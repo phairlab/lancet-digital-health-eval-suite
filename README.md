@@ -94,7 +94,14 @@ After running your training/inference script, the evaluation analysis can be run
 ```bash
 python ldh_eval.py --input_dir "experiment_results/"
 ```
-This saves the in-fold plots and numbers in each individual fold's sub-folder, and meta-analysis of all folds into the `input_dir` path.
+This saves the in-fold plots and numbers in each individual fold's sub-folder, and meta-analysis of all folds into the `input_dir` path. This saves the in-fold plots and numbers in each individual fold's sub-folder, and meta-analysis of all folds into the `input_dir` path.
+
+If the `recursive` flag is set to true, the script will assume that the folder `experiment_results/` contains multiple different experiments, each with their own separate folds. The model will do everything as described above for all the experiment subtypes, as well as plot ROC curves, calibration curves, and decision curves across all experiments. Example:
+
+```bash
+python ldh_eval.py --input_dir "experiment_results/" \
+                   --recursive "True"
+```
 
 
 ## Interpreting the Plots
