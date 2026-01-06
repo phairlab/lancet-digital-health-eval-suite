@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Tuple, Optional, Dict
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
@@ -224,6 +225,9 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
         except Exception as e:
             print(f"Warning: Failed to process {experiment_dir.name} ({e})")
 
+
+
+
     # Generate overlay plots across all experiments
     print("\n=== Generating Overlay Plots Across All Experiments ===")
     overlay_dir = Path(input_dir) / 'overlay_results'
@@ -295,6 +299,37 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     plt.grid(alpha=0.3)
     plt.savefig(overlay_dir / 'overlay_decision_curve.png', dpi=300, bbox_inches='tight')
     plt.close()
+
+
+    # Save combined metrics dataframe
+    print("\n=== Saving Combined Metrics DataFrame ===")
+    metrics_data = []
+    for exp_metrics in all_experiment_metrics:
+        row = {'experiment': exp_metrics['name']}
+        for metric_name, metric_values in exp_metrics['metrics'].items():
+            row[f'{metric_name}_mean'] = metric_values['mean']
+            row[f'{metric_name}_std'] = metric_values['std']
+        metrics_data.append(row)
+    
+    metrics_df = pd.DataFrame(metrics_data)
+    metrics_df.to_csv(overlay_dir / 'combined_metrics.csv', index=False)
+    print(f"✓ Combined metrics saved to {overlay_dir / 'combined_metrics.csv'}")
+
+    # Save combined metrics dataframe (value ± std format) -- for C+P into spreadsheets
+    print("\n=== Saving Combined Metrics DataFrame (± format) ===")
+    metrics_data_formatted = []
+    for exp_metrics in all_experiment_metrics:
+        row = {'experiment': exp_metrics['name']}
+        for metric_name, metric_values in exp_metrics['metrics'].items():
+            mean = metric_values['mean']
+            std = metric_values['std']
+            row[metric_name] = f"{mean:.3f} (±{std:.3f})"
+        metrics_data_formatted.append(row)
+    
+    metrics_df_formatted = pd.DataFrame(metrics_data_formatted)
+    metrics_df_formatted.to_csv(overlay_dir / 'combined_metrics_formatted.tsv', index=False, sep='\t')
+    print(f"✓ Combined metrics (formatted) saved to {overlay_dir / 'combined_metrics_formatted.tsv'}")
+
 
 
 # ============================================================================
