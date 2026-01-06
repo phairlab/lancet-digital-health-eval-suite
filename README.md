@@ -46,6 +46,7 @@ I recommmend having a single conda environment for this evaluation that you can 
 
 ### Import as Package for Direct Use
 ```python
+from core_eval_functions import *
 from ldh_eval import evaluate_model
 
 # Individual plots
@@ -89,6 +90,8 @@ for fold_num in range(n_folds):
         json.dump(test_predictions, f, indent=4)
 ```
 
+### Arguments and Example Usage
+
 After running your training/inference script, the evaluation analysis can be run by passing your output folder (here: `experiment_results`) into `ldh_eval.py`.
  
 ```bash
@@ -96,11 +99,23 @@ python ldh_eval.py --input_dir "experiment_results/"
 ```
 This saves the in-fold plots and numbers in each individual fold's sub-folder, and meta-analysis of all folds into the `input_dir` path. This saves the in-fold plots and numbers in each individual fold's sub-folder, and meta-analysis of all folds into the `input_dir` path.
 
-If the `recursive` flag is set to true, the script will assume that the folder `experiment_results/` contains multiple different experiments, each with their own separate folds. The model will do everything as described above for all the experiment subtypes, as well as plot ROC curves, calibration curves, and decision curves across all experiments. Example:
+Other arguments:
+
+* If the `--recurse` flag is included, the script will assume that the folder `experiment_results/` contains multiple different experiments, each with their own separate folds. The model will do everything as described above for all the experiment subtypes, as well as plot ROC curves, calibration curves, and decision curves across all experiments.
+* If the `--recalibrate` flag is included (RECOMMENDED), logistic recalibration is performed to straighten out the calibration curve. This transformation is monotonic (will not affect discrimination) but tends to improve calibration-related metrics with few if any drawbacks. 
+* If a `--threshold` argument is given (between 0 and 1), an additional suite of evaluations will be saved alongside each analysis: 
+  * `alert_rate`: the percentage of positive predictions when evaluated at the given threshold
+  * `sensitivity`
+  * `specificity`
+  * `ppv`: Positive Predictive Value
+  * `npv`: Negative Predictive Value
+  * `tp`: True Positives
+  * `tn`: True Negatives
+  * `fp`: False Positives
+  * `fn`: False Negatives
 
 ```bash
-python ldh_eval.py --input_dir "experiment_results/" \
-                   --recursive "True"
+python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate --threshold "0.2"
 ```
 
 
@@ -113,7 +128,7 @@ The AUROC quantifies discrimination—the model's ability to rank patients corre
 
 
 ### Calibration Plot
-The calibration plot shows whether predicted probabilities match observed outcomes. The loess curve should hug the diagonal; deviations indicate the model systematically over- or under-predicts risk. A calibration slope near 1.0 is ideal (slope < 1 suggests overfitting, slope > 1 suggests underfitting).
+The calibration plot shows whether predicted probabilities match observed outcomes. The loess curve should hug the diagonal; deviations indicate the model systematically over- or under-predicts risk. A calibration slope near 1.0 is ideal (slope < 1 suggests overfitting, slope > 1 suggests underfitting). Poor calibration can often be solved by using the `--recalibrate` argument.
 
 <img src="examples/calibration.png" alt="AUROC Plot" width="500">
 
