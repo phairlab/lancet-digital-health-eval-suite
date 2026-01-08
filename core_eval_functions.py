@@ -1,10 +1,13 @@
-
+import warnings
 from typing import Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
+
+# Suppress sklearn warnings about penalty/C parameters
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
 
 # ============================================================================
 # CORE EVALUATION FUNCTIONS (for direct import)
@@ -47,7 +50,7 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
         method: 'loess' or 'binned' (default: 'loess')
     """
     
-    # Calculate calibration slope
+    # Calculate calibration slope using unregularized logistic regression on logits
     y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
     logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
     

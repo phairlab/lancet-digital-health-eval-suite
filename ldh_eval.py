@@ -2,11 +2,13 @@
 """
 PHAIR Model Evaluation Suite
 Implements Van Calster et al. (2025) recommendations for clinical ML model evaluation
-Written by Sacha Davis (sdavis1@ualberta.ca)
+Written by Sacha Davis (sdavis1@ualberta.ca) + Copilot (multiple models)
 """
 import os
 import json
 import argparse
+import warnings
+
 from pathlib import Path
 from typing import Tuple, Optional, Dict
 
@@ -19,6 +21,49 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 from sklearn.isotonic import IsotonicRegression
 
 from core_eval_functions import auroc, calibration, decision_curve, risk_distribution
+
+# Suppress sklearn warnings about penalty/C parameters
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
+
+# ============================================================================
+
+# FOR RECURSIVE EVALUATION ACROSS MULTIPLE EXPERIMENTS
+# Define consistent ordering and naming for experiments when generating overlay plots
+#    shorten names for legend labels
+#    use ordering in tuples
+#    filtering to use only experiments defined in consistent ordering
+# element 1 of each tuple is the experiment directory name, element 2 is how you want it labeled in plots
+
+consistent_ordering = ()
+# consistent_ordering = ( 
+#     ("LACE","LACE"),
+#     ("LACE-C","LACE-C"),
+#     ("A0","A0"),
+#     ("A1","A1"),
+#     ("A2","A2"),
+#     ("AH","AH"),
+#     ("AH, 2y Lookback","AH, 2y Lookback"),
+#     ("AH+","AH+"),
+#     ("AH+, 2y Lookback","AH+, 2y Lookback"),
+#     ("D0","D0"),
+#     ("D1","D1"),
+#     ("D2","D2"),
+# )  # example 1
+
+# consistent_ordering = ( 
+#     ("AH","AH"),
+#     ("D1_removedtop0percent","D1: Remove Top 0%"),
+#     ("D1_removedtop5percent","D1: Remove Top 5%"),
+#     ("D1_removedtop10percent","D1: Remove Top 10%"),
+#     ("D1_removedtop15percent","D1: Remove Top 15%"),
+#     ("D1_removedtop20percent","D1: Remove Top 20%"),
+#     ("D1_removedtop25percent","D1: Remove Top 25%"),
+#     ("D1_removedtop30percent","D1: Remove Top 30%"),
+#     ("D1_removedtop35percent","D1: Remove Top 35%"),
+#     ("D1_removedtop40percent","D1: Remove Top 40%"),
+#     ("D1_removedtop45percent","D1: Remove Top 45%"),
+#     ("D1_removedtop50percent","D1: Remove Top 50%"),
+# )  # example 2
 
 
 def convert_to_serializable(obj):
@@ -35,8 +80,18 @@ def convert_to_serializable(obj):
 def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
                    threshold_range: Tuple[float, float] = (0.0, 0.5),
                    output_dir: Optional[str] = None,
-                   threshold: Optional[float] = None) -> Dict[str, float]:
+                   threshold: Optional[float] = None,
+                   recalibrate: bool = False) -> Tuple[Dict[str, float], np.ndarray]:
     """Generate all recommended evaluation plots and metrics"""
+
+    if recalibrate:
+        # Perform logistic recalibration (Platt scaling)
+        # Uses unregularized logistic regression on logit-transformed predictions
+        y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
+        logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
+        lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
+        lr.fit(logit_pred.reshape(-1, 1), y_true)
+        y_prob = lr.predict_proba(logit_pred.reshape(-1, 1))[:, 1]
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -94,14 +149,14 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
             json.dump(metrics, f, indent=4)
         print(f"✓ Results saved to {output_dir}")
 
-    return metrics
+    return metrics, y_prob
 
 
 # ============================================================================
-# CROSS-VALIDATION SUPPORT (for command line usage)
+# CROSS-VALIDATION AND MULTIPLE EXPERIMENT SUPPORT (for command line usage)
 # ============================================================================
 
-def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> None:
+def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Evaluate all folds and aggregate results"""
     json_files = sorted(Path(input_dir).rglob('fold_*_predictions.json'))
     # print(json_files)
@@ -124,16 +179,8 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         y_true = np.array(data['y_true'])
         y_prob = np.array(data['y_proba'])
 
-        if recalibrate:
-            # Perform logistic recalibration
-            y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
-            logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
-            lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
-            lr.fit(logit_pred.reshape(-1, 1), y_true)
-            y_prob = lr.predict_proba(logit_pred.reshape(-1, 1))[:, 1]
-
         fold_dir = os.path.join(input_dir, fold_name)
-        metrics = evaluate_model(y_true, y_prob, output_dir=fold_dir, threshold=threshold)  # Already recalibrated
+        metrics, y_prob = evaluate_model(y_true, y_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate) 
         all_metrics.append(metrics)
 
         pooled_y_true.extend(y_true)
@@ -168,6 +215,8 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 
     print("\n")
 
+    return pooled_y_prob, pooled_y_true
+
 
 def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> None:
     """Evaluate multiple experiments recursively and aggregate results."""
@@ -176,56 +225,46 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     if not experiment_dirs:
         raise ValueError(f"No experiment directories found in {input_dir}")
 
-    # Sort experiment directories to ensure consistent order
-    experiment_dirs = sorted(experiment_dirs, key=lambda d: d.name)
+    # Use consistent_ordering if defined, otherwise sort alphabetically
+    if consistent_ordering:
+        # Create a mapping from dir name to legend name
+        ordering_dict = {dir_name: legend_name for dir_name, legend_name in consistent_ordering}
+        # Filter and order experiment_dirs based on consistent_ordering
+        ordered_dirs = []
+        for dir_name, legend_name in consistent_ordering:
+            matching = [d for d in experiment_dirs if d.name == dir_name]
+            if matching:
+                ordered_dirs.append((matching[0], legend_name))
+        experiment_dirs_with_labels = ordered_dirs
+    else:
+        # Sort experiment directories alphabetically and use dir name as label
+        experiment_dirs = sorted(experiment_dirs, key=lambda d: d.name)
+        experiment_dirs_with_labels = [(d, d.name) for d in experiment_dirs]
 
-    print(f"Found {len(experiment_dirs)} experiments")
+    print(f"Found {len(experiment_dirs_with_labels)} experiments")
 
     all_experiment_metrics = []
-    pooled_y_true = []
-    pooled_y_prob = []
+    pooled_y_trues = []
+    pooled_y_probs = []
 
-    for experiment_dir in experiment_dirs:
+    for experiment_dir, legend_name in experiment_dirs_with_labels:
         print(f"Processing experiment: {experiment_dir.name}")
         try:
-            evaluate_cross_validation(str(experiment_dir), recalibrate=recalibrate, threshold=threshold)
+            pooled_y_prob, pooled_y_true = evaluate_cross_validation(str(experiment_dir), recalibrate=recalibrate, threshold=threshold)
 
             # Collect aggregate metrics from each experiment
             with open(Path(experiment_dir) / 'aggregate_metrics.json', 'r') as f:
                 experiment_metrics = json.load(f)
                 all_experiment_metrics.append({
-                    'name': experiment_dir.name,
+                    'name': legend_name,
                     'metrics': experiment_metrics
                 })
 
-            # Collect pooled predictions from each experiment (for separate curves)
-            exp_y_true = []
-            exp_y_prob = []
-            json_files = sorted(Path(experiment_dir).rglob('fold_*_predictions.json'))
-            for json_file in json_files:
-                with open(json_file, 'r') as f:
-                    data = json.load(f)
-                y_true = np.array(data['y_true'])
-                y_prob = np.array(data['y_proba'])
-
-                if recalibrate:
-                    # Perform logistic recalibration
-                    y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
-                    logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
-                    lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
-                    lr.fit(logit_pred.reshape(-1, 1), y_true)
-                    y_prob = lr.predict_proba(logit_pred.reshape(-1, 1))[:, 1]
-
-                exp_y_true.extend(y_true)
-                exp_y_prob.extend(y_prob)
-
-            pooled_y_true.append(np.array(exp_y_true))
-            pooled_y_prob.append(np.array(exp_y_prob))
+            pooled_y_trues.append(np.array(pooled_y_true))
+            pooled_y_probs.append(np.array(pooled_y_prob))
 
         except Exception as e:
             print(f"Warning: Failed to process {experiment_dir.name} ({e})")
-
-
 
 
     # Generate overlay plots across all experiments
@@ -235,7 +274,7 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
     # ROC curves overlay
     plt.figure(figsize=(8, 6))
-    for i, (y_true, y_prob) in enumerate(zip(pooled_y_true, pooled_y_prob)):
+    for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         fpr, tpr, _ = roc_curve(y_true, y_prob)
         auc = roc_auc_score(y_true, y_prob)
         plt.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc:.3f})', linewidth=2)
@@ -250,7 +289,7 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
     # Calibration curves overlay
     plt.figure(figsize=(8, 6))
-    for i, (y_true, y_prob) in enumerate(zip(pooled_y_true, pooled_y_prob)):
+    for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         sort_idx = np.argsort(y_prob)
         y_prob_sorted = y_prob[sort_idx]
         y_true_sorted = y_true[sort_idx].astype(float)
@@ -274,7 +313,7 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     # Decision curves overlay
     plt.figure(figsize=(10, 6))
     thresholds = np.linspace(0.0, 0.5, 100)
-    for i, (y_true, y_prob) in enumerate(zip(pooled_y_true, pooled_y_prob)):
+    for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         net_benefits = []
         for threshold in thresholds:
             y_pred = (y_prob >= threshold).astype(int)
@@ -286,7 +325,7 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
         plt.plot(thresholds, net_benefits, linewidth=2, 
                 label=all_experiment_metrics[i]['name'])
 
-    prevalence = np.mean([y.mean() for y in pooled_y_true])
+    prevalence = np.mean([y.mean() for y in pooled_y_trues])
     treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresholds]
     plt.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7)
     plt.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
