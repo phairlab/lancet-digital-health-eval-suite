@@ -4,6 +4,7 @@ PHAIR Model Evaluation Suite
 Implements Van Calster et al. (2025) recommendations for clinical ML model evaluation
 Written by Sacha Davis (sdavis1@ualberta.ca) + Copilot (multiple models)
 """
+
 import os
 import json
 import argparse
@@ -23,6 +24,7 @@ from sklearn.isotonic import IsotonicRegression
 from core_eval_functions import auroc, calibration, decision_curve, risk_distribution
 
 # Suppress sklearn warnings about penalty/C parameters
+# IDK why this isn't working -- sorry lol
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
 
 # ============================================================================
@@ -65,6 +67,7 @@ consistent_ordering = ()
 #     ("D1_removedtop50percent","D1: Remove Top 50%"),
 # )  # example 2
 
+# ============================================================================
 
 def convert_to_serializable(obj):
     """Convert NumPy data types to native Python types for JSON serialization."""
@@ -330,7 +333,13 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     plt.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7)
     plt.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
     plt.xlim(0, 0.5)
-    plt.ylim(-0.2, 0.2)
+
+    max_y = max(max(net_benefits) for net_benefits in [nb for _, nb in zip(pooled_y_true, [net_benefits])])
+    max_y = max(max_y, max(treat_all), 0)  # Include treat_all and treat_none (0) lines
+    plt.ylim(-0.05, max_y * 1.1)  # Add 10% padding above max value
+
+    plt.xlim(0, 0.5)
+    
     plt.xlabel('Decision Threshold')
     plt.ylabel('Net Benefit')
     plt.title('Decision Curves - All Experiments')
