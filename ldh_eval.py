@@ -19,16 +19,15 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
-from sklearn.isotonic import IsotonicRegression
 
 from core_eval_functions import auroc, calibration, decision_curve, risk_distribution
+from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
 # IDK why this isn't working -- sorry lol
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
 
 # ============================================================================
-
 # FOR RECURSIVE EVALUATION ACROSS MULTIPLE EXPERIMENTS
 # Define consistent ordering and naming for experiments when generating overlay plots
 #    shorten names for legend labels
@@ -68,17 +67,6 @@ consistent_ordering = ()
 # )  # example 2
 
 # ============================================================================
-
-def convert_to_serializable(obj):
-    """Convert NumPy data types to native Python types for JSON serialization."""
-    if isinstance(obj, (np.integer, np.int64)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    return obj
-
 
 def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
                    threshold_range: Tuple[float, float] = (0.0, 0.5),
@@ -348,6 +336,14 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     plt.savefig(overlay_dir / 'overlay_decision_curve.png', dpi=300, bbox_inches='tight')
     plt.close()
 
+    # Risk distribution grid
+    experiment_names = [exp['name'] for exp in all_experiment_metrics]
+    risk_distribution_grid(
+        pooled_y_trues, 
+        pooled_y_probs,
+        experiment_names,
+        save_path=overlay_dir / 'overlay_risk_distribution.png'
+    )
 
     # Save combined metrics dataframe
     print("\n=== Saving Combined Metrics DataFrame ===")
