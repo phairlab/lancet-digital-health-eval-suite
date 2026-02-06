@@ -264,46 +264,49 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     os.makedirs(overlay_dir, exist_ok=True)
 
     # ROC curves overlay
-    plt.figure(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         fpr, tpr, _ = roc_curve(y_true, y_prob)
         auc = roc_auc_score(y_true, y_prob)
-        plt.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc:.3f})', linewidth=2)
-    plt.plot([0, 1], [0, 1], 'k--', label='Random')
-    plt.xlabel('1 - Specificity')
-    plt.ylabel('Sensitivity')
-    plt.title('ROC Curves - All Experiments')
-    plt.legend(loc='best', title='Experiments', fontsize=10, title_fontsize=11)
-    plt.grid(alpha=0.3)
+        ax.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc:.3f})', linewidth=2)
+    ax.plot([0, 1], [0, 1], 'k--', label='Random', linewidth=1.5)
+    ax.set_xlabel('1 - Specificity', fontsize=12)
+    ax.set_ylabel('Sensitivity', fontsize=12)
+    ax.set_title('ROC Curves - All Experiments', fontsize=14, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
     plt.savefig(overlay_dir / 'overlay_auroc.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     # Calibration curves overlay
-    plt.figure(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         sort_idx = np.argsort(y_prob)
         y_prob_sorted = y_prob[sort_idx]
         y_true_sorted = y_true[sort_idx].astype(float)
         try:
             smoothed = lowess(y_true_sorted, y_prob_sorted, frac=0.25, it=0, return_sorted=True)
-            plt.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2, 
+            ax.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2, 
                     label=all_experiment_metrics[i]['name'])
         except Exception as e:
             print(f"Warning: Loess smoothing failed for {all_experiment_metrics[i]['name']} ({e})")
-    plt.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Perfect calibration')
-    plt.xlabel('Predicted Probability')
-    plt.ylabel('Observed Proportion')
-    plt.title('Calibration Curves - All Experiments')
-    plt.legend(loc='best', title='Experiments', fontsize=10, title_fontsize=11)
-    plt.grid(alpha=0.3)
-    plt.xlim(-0.02, 1.02)
-    plt.ylim(-0.02, 1.02)
+    ax.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Perfect calibration')
+    ax.set_xlabel('Predicted Probability', fontsize=12)
+    ax.set_ylabel('Observed Proportion', fontsize=12)
+    ax.set_title('Calibration Curves - All Experiments', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
     plt.savefig(overlay_dir / 'overlay_calibration.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     # Decision curves overlay
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
     thresholds = np.linspace(0.0, 0.5, 100)
+    all_net_benefits = []
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         net_benefits = []
         for threshold in thresholds:
@@ -313,26 +316,25 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
             n = len(y_true)
             net_benefit = (tp / n) - (fp / n) * (threshold / (1 - threshold))
             net_benefits.append(net_benefit)
-        plt.plot(thresholds, net_benefits, linewidth=2, 
+        all_net_benefits.append(net_benefits)
+        ax.plot(thresholds, net_benefits, linewidth=2, 
                 label=all_experiment_metrics[i]['name'])
 
     prevalence = np.mean([y.mean() for y in pooled_y_trues])
     treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresholds]
-    plt.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7)
-    plt.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
-    plt.xlim(0, 0.5)
+    ax.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#1f77b4')
+    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
 
-    max_y = max(max(net_benefits) for net_benefits in [nb for _, nb in zip(pooled_y_true, [net_benefits])])
-    max_y = max(max_y, max(treat_all), 0)  # Include treat_all and treat_none (0) lines
-    plt.ylim(-0.05, max_y * 1.1)  # Add 10% padding above max value
-
-    plt.xlim(0, 0.5)
+    max_y = max(max(nb) for nb in all_net_benefits)
+    max_y = max(max_y, max(treat_all), 0)
+    ax.set_ylim(-0.05, max_y * 1.15)
+    ax.set_xlim(0, 0.5)
     
-    plt.xlabel('Decision Threshold')
-    plt.ylabel('Net Benefit')
-    plt.title('Decision Curves - All Experiments')
-    plt.legend(loc='best', title='Experiments', fontsize=10, title_fontsize=11)
-    plt.grid(alpha=0.3)
+    ax.set_xlabel('Decision Threshold', fontsize=12)
+    ax.set_ylabel('Net Benefit', fontsize=12)
+    ax.set_title('Decision Curves - All Experiments', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
     plt.savefig(overlay_dir / 'overlay_decision_curve.png', dpi=300, bbox_inches='tight')
     plt.close()
 
