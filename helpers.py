@@ -2,6 +2,7 @@
 Helper functions for the PHAIR Model Evaluation Suite
 """
 
+import textwrap
 from typing import Tuple, Optional
 
 import numpy as np
@@ -120,7 +121,9 @@ def risk_distribution_grid(y_trues: list, y_probs: list,
             else:
                 ax.set_ylabel('')
             ax.set_xlabel('')
-            ax.set_title(name, fontsize=11, fontweight='bold')
+            # Wrap long titles to prevent overlap
+            wrapped_title = '\n'.join(textwrap.wrap(name, width=25))
+            ax.set_title(wrapped_title, fontsize=11, fontweight='bold')
             ax.grid(axis='y', alpha=0.3)
             
             plot_idx += 1
