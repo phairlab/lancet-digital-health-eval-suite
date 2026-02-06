@@ -19,14 +19,16 @@ def auroc(y_true: np.ndarray, y_prob: np.ndarray,
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     auc = roc_auc_score(y_true, y_prob)
     
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, label=f'AUROC = {auc:.3f}')
-    plt.plot([0, 1], [0, 1], 'k--', label='Random')
-    plt.xlabel('1 - Specificity')
-    plt.ylabel('Sensitivity')
-    plt.title('ROC Curve')
-    plt.legend()
-    plt.grid(alpha=0.3)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(fpr, tpr, label=f'AUROC = {auc:.3f}', linewidth=2, color='#1f77b4')
+    ax.plot([0, 1], [0, 1], 'k--', label='Random', linewidth=1.5)
+    ax.set_xlabel('1 - Specificity', fontsize=12)
+    ax.set_ylabel('Sensitivity', fontsize=12)
+    ax.set_title('ROC Curve', fontsize=14, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -100,8 +102,8 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
     ax.set_xlabel('Predicted Probability', fontsize=12)
     ax.set_ylabel('Observed Proportion', fontsize=12)
     ax.set_title(f'Calibration Plot (Slope = {calibration_slope:.3f}, Intercept = {calibration_intercept:.3f}, Brier = {brier:.3f})', 
-                 fontsize=13)
-    ax.legend(loc='upper left')
+                 fontsize=12, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
     ax.grid(alpha=0.3)
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
@@ -133,21 +135,21 @@ def decision_curve(y_true: np.ndarray, y_prob: np.ndarray,
     
     treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresholds]
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(thresholds, net_benefits, label='Model', linewidth=2.5, color='#1f77b4')
-    plt.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#ff7f0e')
-    plt.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(thresholds, net_benefits, label='Model', linewidth=2.5, color='#1f77b4')
+    ax.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#ff7f0e')
+    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
     
-    plt.xlabel('Decision Threshold', fontsize=12)
-    plt.ylabel('Net Benefit', fontsize=12)
-    plt.title('Decision Curve Analysis', fontsize=13)
-    plt.legend(fontsize=11)
-    plt.grid(alpha=0.3)
+    ax.set_xlabel('Decision Threshold', fontsize=12)
+    ax.set_ylabel('Net Benefit', fontsize=12)
+    ax.set_title('Decision Curve Analysis', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
     
     # Focus on clinically relevant range
     max_nb = max(net_benefits)
-    plt.ylim(-0.05, max_nb * 1.15)  # Small negative buffer, space above max
-    plt.xlim(threshold_range[0], threshold_range[1])
+    ax.set_ylim(-0.05, max_nb * 1.15)
+    ax.set_xlim(threshold_range[0], threshold_range[1])
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -168,22 +170,25 @@ def risk_distribution(y_true: np.ndarray, y_prob: np.ndarray,
         'Outcome': ['Positive' if y else 'Negative' for y in y_true]
     })
 
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     # Plot dots FIRST (so they're behind), make them more transparent
-    sns.stripplot(data=df, x='Outcome', y='Predicted Probability', 
-                  alpha=0.2, size=2, color='black', zorder=1)
+    sns.stripplot(data=df, x='Outcome', y='Predicted Probability',
+                  order=['Negative', 'Positive'],
+                  alpha=0.2, size=2, color='black', zorder=1, ax=ax)
 
     # Plot violin on top with some transparency and cut=0 to prevent bleeding
-    sns.violinplot(data=df, x='Outcome', y='Predicted Probability', 
+    sns.violinplot(data=df, x='Outcome', y='Predicted Probability',
+                   order=['Negative', 'Positive'],
                    inner=None, palette=['#1f77b4', '#ff7f0e'], 
-                   alpha=0.6, zorder=2, cut=0, hue='Outcome', legend=False)
+                   alpha=0.6, zorder=2, cut=0, hue='Outcome',
+                   hue_order=['Negative', 'Positive'], legend=False, ax=ax)
 
-    plt.ylim(-0.05, 1.05)
-    plt.ylabel('Predicted Probability', fontsize=12)
-    plt.xlabel('True Outcome', fontsize=12)
-    plt.title('Risk Distribution by Outcome', fontsize=13)
-    plt.grid(axis='y', alpha=0.3)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_ylabel('Predicted Probability', fontsize=12)
+    ax.set_xlabel('True Outcome', fontsize=12)
+    ax.set_title('Risk Distribution by Outcome', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3)
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
