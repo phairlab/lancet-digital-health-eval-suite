@@ -268,8 +268,10 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     fig, ax = plt.subplots(figsize=(8, 6))
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         fpr, tpr, _ = roc_curve(y_true, y_prob)
-        auc = roc_auc_score(y_true, y_prob)
-        ax.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc:.3f})', linewidth=2)
+        # Use mean and std from aggregate metrics instead of pooled AUROC
+        auc_mean = all_experiment_metrics[i]['metrics']['auroc']['mean']
+        auc_std = all_experiment_metrics[i]['metrics']['auroc']['std']
+        ax.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc_mean:.3f}±{auc_std:.3f})', linewidth=2)
     ax.plot([0, 1], [0, 1], 'k--', label='Random', linewidth=1.5)
     ax.set_xlabel('1 - Specificity', fontsize=12)
     ax.set_ylabel('Sensitivity', fontsize=12)
