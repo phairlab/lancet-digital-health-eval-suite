@@ -102,6 +102,8 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
     brier = brier_score_loss(y_true, y_prob)
 
     metrics = {
+        'n': len(y_true),
+        'prevalence_pct': float(np.mean(y_true) * 100),
         'auroc': auc,
         'calibration_slope': cal_slope,
         'brier_score': brier
@@ -372,7 +374,13 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
         for metric_name, metric_values in exp_metrics['metrics'].items():
             mean = metric_values['mean']
             std = metric_values['std']
-            row[metric_name] = f"{mean:.3f} (±{std:.3f})"
+            # Format n as integer, prevalence with 1 decimal, others with 3 decimals
+            if metric_name == 'n':
+                row[metric_name] = f"{mean:.0f} (±{std:.0f})"
+            elif metric_name == 'prevalence_pct':
+                row[metric_name] = f"{mean:.1f}% (±{std:.1f}%)"
+            else:
+                row[metric_name] = f"{mean:.3f} (±{std:.3f})"
         metrics_data_formatted.append(row)
     
     metrics_df_formatted = pd.DataFrame(metrics_data_formatted)
