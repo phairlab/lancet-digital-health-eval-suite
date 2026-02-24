@@ -119,26 +119,32 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
 
 def decision_curve(y_true: np.ndarray, y_prob: np.ndarray,
                    threshold_range: Tuple[float, float] = (0.0, 0.5),
-                   save_path: Optional[str] = None) -> None:
+                   save_path: Optional[str] = None,
+                   threshold: Optional[float] = None) -> None:
     """Generate decision curve analysis"""
     thresholds = np.linspace(threshold_range[0], threshold_range[1], 100)
     net_benefits = []
     prevalence = y_true.mean()
     
-    for threshold in thresholds:
-        y_pred = (y_prob >= threshold).astype(int)
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
         tp = np.sum((y_pred == 1) & (y_true == 1))
         fp = np.sum((y_pred == 1) & (y_true == 0))
         n = len(y_true)
-        net_benefit = (tp / n) - (fp / n) * (threshold / (1 - threshold))
+        net_benefit = (tp / n) - (fp / n) * (thresh / (1 - thresh))
         net_benefits.append(net_benefit)
     
     treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresholds]
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(thresholds, net_benefits, label='Model', linewidth=2.5, color='#1f77b4')
-    ax.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#ff7f0e')
-    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
+    
+    # Draw vertical line at threshold if provided
+    if threshold is not None and threshold_range[0] <= threshold <= threshold_range[1]:
+        ax.axvline(threshold, linestyle='-', color='red', linewidth=1.5, alpha=0.6, label=f'Threshold ({threshold:.2f})', zorder=4)
+    
+    ax.plot(thresholds, net_benefits, label='Model', linewidth=2.5, color='#1f77b4', zorder=3)
+    ax.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#ff7f0e', zorder=2)
+    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7, zorder=2)
     
     ax.set_xlabel('Decision Threshold', fontsize=12)
     ax.set_ylabel('Net Benefit', fontsize=12)

@@ -94,7 +94,8 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
     cal_slope = calibration(y_true, y_prob,
                            save_path=os.path.join(output_dir, 'calibration.png') if output_dir else None)
     decision_curve(y_true, y_prob, threshold_range=threshold_range,
-                  save_path=os.path.join(output_dir, 'decision_curve.png') if output_dir else None)
+                  save_path=os.path.join(output_dir, 'decision_curve.png') if output_dir else None,
+                  threshold=threshold)
     risk_distribution(y_true, y_prob,
                      save_path=os.path.join(output_dir, 'risk_distribution.png') if output_dir else None)
 
@@ -204,7 +205,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 
     auroc(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_auroc.png'))
     calibration(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_calibration.png'))
-    decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'))
+    decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'), threshold=threshold)
     risk_distribution(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_risk_distribution.png'))
 
     print("\n")
@@ -310,25 +311,30 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
     # Decision curves overlay
     fig, ax = plt.subplots(figsize=(10, 6))
-    thresholds = np.linspace(0.0, 0.5, 100)
+    thresh_range = np.linspace(0.0, 0.5, 100)
     all_net_benefits = []
+    
+    # Draw vertical line at threshold if provided
+    if threshold is not None and 0.0 <= threshold <= 0.5:
+        ax.axvline(threshold, linestyle='-', color='red', linewidth=1.5, alpha=0.6, label=f'Threshold ({threshold:.2f})', zorder=4)
+    
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         net_benefits = []
-        for threshold in thresholds:
-            y_pred = (y_prob >= threshold).astype(int)
+        for thresh in thresh_range:
+            y_pred = (y_prob >= thresh).astype(int)
             tp = np.sum((y_pred == 1) & (y_true == 1))
             fp = np.sum((y_pred == 1) & (y_true == 0))
             n = len(y_true)
-            net_benefit = (tp / n) - (fp / n) * (threshold / (1 - threshold))
+            net_benefit = (tp / n) - (fp / n) * (thresh / (1 - thresh))
             net_benefits.append(net_benefit)
         all_net_benefits.append(net_benefits)
-        ax.plot(thresholds, net_benefits, linewidth=2, 
-                label=all_experiment_metrics[i]['name'])
+        ax.plot(thresh_range, net_benefits, linewidth=2, 
+                label=all_experiment_metrics[i]['name'], zorder=3)
 
     prevalence = np.mean([y.mean() for y in pooled_y_trues])
-    treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresholds]
-    ax.plot(thresholds, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#1f77b4')
-    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7)
+    treat_all = [prevalence - (1 - prevalence) * (t / (1 - t)) for t in thresh_range]
+    ax.plot(thresh_range, treat_all, '--', label='Treat All', linewidth=2, alpha=0.7, color='#1f77b4', zorder=2)
+    ax.axhline(0, linestyle='--', color='gray', label='Treat None', linewidth=2, alpha=0.7, zorder=2)
 
     max_y = max(max(nb) for nb in all_net_benefits)
     max_y = max(max_y, max(treat_all), 0)
