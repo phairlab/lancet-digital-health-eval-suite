@@ -34,10 +34,14 @@ evaluate_model(y_true, y_prob, output_dir="results/")
 
 ### Set Up Dependencies
 ```bash
+python3 -m venv ldh_eval
+source ldh_eval/bin/activate
 pip install -r requirements.txt
 ```
 or
 ```bash
+conda create -n lhd_eval
+conda activate lhd_eval
 conda install --yes --file requirements.txt
 ```
 
