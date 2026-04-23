@@ -20,7 +20,7 @@ from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
-from core_eval_functions import auroc, calibration, decision_curve, risk_distribution
+from core_eval_functions import auroc, calibration, decision_curve, risk_distribution, bengio_nadeau_test
 from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
@@ -213,7 +213,8 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     return pooled_y_prob, pooled_y_true
 
 
-def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> None:
+def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None,
+                       bengio_correction: bool = False) -> None:
     """Evaluate multiple experiments recursively and aggregate results."""
     experiment_dirs = [d for d in Path(input_dir).iterdir() if d.is_dir()]
 
@@ -393,6 +394,131 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     metrics_df_formatted.to_csv(overlay_dir / 'combined_metrics_formatted.tsv', index=False, sep='\t')
     print(f"✓ Combined metrics (formatted) saved to {overlay_dir / 'combined_metrics_formatted.tsv'}")
 
+    if bengio_correction:
+        bengio_correction_analysis(experiment_dirs_with_labels, overlay_dir)
+
+
+
+# ============================================================================
+# BENGIO-NADEAU CORRECTION FOR MULTI-EXPERIMENT COMPARISON
+# ============================================================================
+
+# Metrics excluded from statistical comparison (not continuous performance measures)
+_SKIP_METRICS = {'n', 'prevalence_pct', 'tp', 'tn', 'fp', 'fn'}
+
+def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: Path) -> None:
+    """
+    Pairwise Nadeau-Bengio corrected t-tests across experiments.
+
+    Reads per-fold metrics.json files saved during evaluate_cross_validation,
+    pairs folds by name across experiments, and produces a CSV with corrected
+    t-statistics and p-values for every performance metric.
+
+    Output files written to overlay_dir:
+        bengio_correction.csv           -- long-form pairwise comparison table
+        bengio_correction_auroc_pvals.csv -- square p-value matrix for AUROC
+    """
+    print("\n=== Running Bengio-Nadeau Corrected Comparisons ===")
+
+    # Collect per-fold metrics for each experiment
+    experiment_fold_metrics: Dict[str, dict] = {}
+    for exp_dir, exp_name in experiment_dirs_with_labels:
+        fold_files = sorted(Path(exp_dir).glob('fold_*/metrics.json'))
+        if not fold_files:
+            print(f"Warning: No fold metrics found for {exp_name}, skipping.")
+            continue
+        fold_metrics = {}
+        for ff in fold_files:
+            with open(ff) as f:
+                fold_metrics[ff.parent.name] = json.load(f)
+        experiment_fold_metrics[exp_name] = fold_metrics
+
+    if len(experiment_fold_metrics) < 2:
+        print("Warning: Need at least 2 experiments with fold metrics for comparison.")
+        return
+
+    # Find folds present in all experiments
+    all_fold_sets = [set(fm.keys()) for fm in experiment_fold_metrics.values()]
+    common_folds = sorted(set.intersection(*all_fold_sets))
+    k = len(common_folds)
+
+    if k < 2:
+        print(f"Warning: Only {k} common fold(s) across experiments — need ≥2 for the test.")
+        return
+
+    missing = set.union(*all_fold_sets) - set(common_folds)
+    if missing:
+        print(f"Note: Folds {missing} not present in all experiments; using {k} common folds.")
+
+    # Estimate average n_test and n_train across folds
+    # In k-fold CV: n_total ≈ k * n_test, n_train ≈ (k-1) * n_test
+    all_n = [
+        fold_metrics[fold]['n']
+        for fold_metrics in experiment_fold_metrics.values()
+        for fold in common_folds
+        if 'n' in fold_metrics.get(fold, {})
+    ]
+    n_test = float(np.mean(all_n))
+    n_train = n_test * (k - 1)  # standard k-fold assumption
+
+    print(f"Folds: {k}  |  avg n_test: {n_test:.0f}  |  avg n_train: {n_train:.0f}")
+
+    # Determine which metrics to compare
+    first_exp = next(iter(experiment_fold_metrics.values()))
+    first_fold = next(iter(first_exp.values()))
+    compare_metrics = [m for m in first_fold if m not in _SKIP_METRICS]
+
+    # Pairwise corrected t-tests
+    exp_names = list(experiment_fold_metrics.keys())
+    rows = []
+
+    for i, name_a in enumerate(exp_names):
+        for j, name_b in enumerate(exp_names):
+            if j <= i:
+                continue
+            row = {'experiment_A': name_a, 'experiment_B': name_b, 'k_folds': k,
+                   'avg_n_test': round(n_test), 'avg_n_train': round(n_train)}
+            for metric in compare_metrics:
+                diffs = []
+                for fold in common_folds:
+                    ma = experiment_fold_metrics[name_a].get(fold, {}).get(metric)
+                    mb = experiment_fold_metrics[name_b].get(fold, {}).get(metric)
+                    if ma is not None and mb is not None:
+                        diffs.append(ma - mb)
+                if len(diffs) >= 2:
+                    t_stat, p_val = bengio_nadeau_test(diffs, n_test, n_train)
+                    row[f'{metric}_mean_diff(A-B)'] = round(float(np.mean(diffs)), 5)
+                    row[f'{metric}_t'] = round(t_stat, 4) if not np.isnan(t_stat) else np.nan
+                    row[f'{metric}_p'] = round(p_val, 5) if not np.isnan(p_val) else np.nan
+                    row[f'{metric}_sig_p05'] = (p_val < 0.05) if not np.isnan(p_val) else False
+            rows.append(row)
+
+    results_df = pd.DataFrame(rows)
+    out_path = overlay_dir / 'bengio_correction.csv'
+    results_df.to_csv(out_path, index=False)
+    print(f"✓ Pairwise comparison table saved to {out_path}")
+
+    # Square p-value matrix for AUROC
+    if 'auroc' in compare_metrics:
+        auroc_matrix = pd.DataFrame(index=exp_names, columns=exp_names, dtype=float)
+        np.fill_diagonal(auroc_matrix.values, 1.0)
+        for row in rows:
+            na, nb = row['experiment_A'], row['experiment_B']
+            p = row.get('auroc_p', np.nan)
+            auroc_matrix.loc[na, nb] = p
+            auroc_matrix.loc[nb, na] = p  # symmetric
+        matrix_path = overlay_dir / 'bengio_correction_auroc_pvals.csv'
+        auroc_matrix.to_csv(matrix_path)
+        print(f"✓ AUROC p-value matrix saved to {matrix_path}")
+
+    # Print summary to console
+    print("\nPairwise AUROC comparisons (Bengio-Nadeau corrected, two-tailed):")
+    for row in rows:
+        diff = row.get('auroc_mean_diff(A-B)', np.nan)
+        p = row.get('auroc_p', np.nan)
+        sig = '*' if row.get('auroc_sig_p05', False) else ' '
+        print(f"  {sig} {row['experiment_A']} vs {row['experiment_B']}: "
+              f"Δ={diff:+.4f}, p={p:.4f}")
 
 
 # ============================================================================
@@ -411,10 +537,16 @@ if __name__ == '__main__':
                         help='Perform logistic recalibration before evaluation')
     parser.add_argument('--threshold', type=float, default=None,
                         help='Threshold for classification metrics (e.g., sensitivity, specificity)')
+    parser.add_argument('--bengio-correction', action='store_true',
+                        help='Run Nadeau-Bengio corrected pairwise t-tests across experiments (requires --recurse)')
 
     args = parser.parse_args()
 
+    if args.bengio_correction and not args.recurse:
+        parser.error('--bengio-correction requires --recurse')
+
     if args.recurse:
-        evaluate_recursive(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold)
+        evaluate_recursive(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold,
+                           bengio_correction=args.bengio_correction)
     else:
         evaluate_cross_validation(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold)

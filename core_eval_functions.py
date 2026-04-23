@@ -1,13 +1,47 @@
 import warnings
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy import stats
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 # Suppress sklearn warnings about penalty/C parameters
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
+
+# ============================================================================
+# STATISTICAL COMPARISON (Nadeau & Bengio, 1999)
+# ============================================================================
+
+def bengio_nadeau_test(diffs: List[float], n_test: float, n_train: float) -> Tuple[float, float]:
+    """
+    Corrected paired t-test for comparing cross-validated models (Nadeau & Bengio, 1999).
+
+    A naive paired t-test on fold-level differences underestimates variance because
+    folds share training data. This correction multiplies the sample variance by
+    (1/k + n_test/n_train) before computing the t-statistic.
+
+    Args:
+        diffs:   Per-fold metric differences (model_A - model_B), length k.
+        n_test:  Average number of test samples per fold.
+        n_train: Average number of training samples per fold.
+
+    Returns:
+        (t_stat, p_value) two-tailed. Returns (nan, nan) if undetermined.
+    """
+    k = len(diffs)
+    if k < 2:
+        return np.nan, np.nan
+    mean_d = np.mean(diffs)
+    var_d = np.var(diffs, ddof=1)
+    corrected_var = (1 / k + n_test / n_train) * var_d
+    if corrected_var <= 0:
+        return np.nan, np.nan
+    t_stat = mean_d / np.sqrt(corrected_var)
+    p_value = 2 * stats.t.sf(abs(t_stat), df=k - 1)
+    return float(t_stat), float(p_value)
+
 
 # ============================================================================
 # CORE EVALUATION FUNCTIONS (for direct import)

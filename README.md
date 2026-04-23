@@ -117,10 +117,23 @@ Other arguments:
   * `tn`: True Negatives
   * `fp`: False Positives
   * `fn`: False Negatives
+* If the `--bengio-correction` flag is included (requires `--recurse`), pairwise statistical comparisons between all experiments are run using the Nadeau-Bengio corrected paired t-test. This test accounts for the fact that cross-validation folds share training data, making a naive paired t-test anti-conservative. Two output files are saved to `overlay_results/`:
+  * `bengio_correction.csv` — long-form table with corrected t-statistics, two-tailed p-values, and mean metric differences for every pairwise experiment comparison and every performance metric
+  * `bengio_correction_auroc_pvals.csv` — square p-value matrix for AUROC, convenient for copy-paste into tables
 
 ```bash
-python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate --threshold "0.2"
+python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate --threshold "0.2" --bengio-correction
 ```
+
+### A note on the Bengio-Nadeau correction
+
+A standard paired t-test over fold-level differences underestimates variance because any two folds share the majority of their training data, making their scores positively correlated. Nadeau & Bengio (1999) derived a corrected variance estimate:
+
+```
+corrected_var = (1/k + n_test/n_train) × var(differences)
+```
+
+where `k` is the number of folds, `n_test` is the average test set size per fold, and `n_train` is the average training set size per fold. The t-statistic is then `mean(differences) / sqrt(corrected_var)`, evaluated against a t-distribution with `k - 1` degrees of freedom. The correction is conservative relative to the naive test — especially when `n_test/n_train` is large (i.e., few folds or small datasets).
 
 
 ## Interpreting the Plots
