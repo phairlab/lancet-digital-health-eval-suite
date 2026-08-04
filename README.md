@@ -159,24 +159,24 @@ where `k` is the number of folds, `n_test` is the average test set size per fold
 ### AUROC (ROC Curve)
 The AUROC quantifies discrimination—the model's ability to rank patients correctly. Values closer to 1.0 indicate better discrimination; 0.5 is random guessing.
 
-<img src="examples/auroc.png" alt="AUROC Plot" width="500">
+<img src="examples/overlay_auroc.png" alt="AUROC Plot" width="500">
 
 
 ### Calibration Plot
 The calibration plot shows whether predicted probabilities match observed outcomes. The loess curve should hug the diagonal; deviations indicate the model systematically over- or under-predicts risk. A calibration slope near 1.0 is ideal (slope < 1 suggests overfitting, slope > 1 suggests underfitting). Poor calibration can often be solved by using the `--recalibrate` argument.
 
-<img src="examples/calibration.png" alt="AUROC Plot" width="500">
+<img src="examples/overlay_calibration.png" alt="AUROC Plot" width="500">
 
 ### Decision Curve Analysis
 Decision curves show net benefit—whether using the model improves decisions compared to "treat all" or "treat none" strategies. The model is clinically useful only where its curve (blue) is above both reference lines; higher net benefit is better.
 
-<img src="examples/decision_curve.png" alt="AUROC Plot" width="500">
+<img src="examples/overlay_decision_curve.png" alt="AUROC Plot" width="500">
 
 
 ### Risk Distribution by Outcome
 Violin plots show how predicted probabilities are distributed for patients who did vs. didn't experience the outcome. Good discrimination means clear separation: negatives clustered at low probabilities, positives clustered at high probabilities, with minimal overlap.
 
-<img src="examples/risk_distribution.png" alt="AUROC Plot" width="500">
+<img src="examples/overlay_risk_distribution.png" alt="AUROC Plot" width="500">
 
 
 ## Citation
