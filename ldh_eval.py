@@ -6,6 +6,7 @@ Written by Sacha Davis (sdavis1@ualberta.ca) + Copilot (multiple models)
 """
 
 import os
+import csv
 import json
 import argparse
 import warnings
@@ -16,11 +17,12 @@ from typing import Tuple, Optional, Dict
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
+from sklearn.metrics import roc_curve, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
-from core_eval_functions import auroc, calibration, decision_curve, risk_distribution, bengio_nadeau_test
+from core_eval_functions import (auroc, calibration, decision_curve, risk_distribution,
+                                 bengio_nadeau_test, bootstrap_ci, BOOTSTRAP_METRICS)
 from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
@@ -63,6 +65,147 @@ consistent_ordering = ()
 #     ("D1_removedtop45percent","D1: Remove Top 45%"),
 #     ("D1_removedtop50percent","D1: Remove Top 50%"),
 # )  # example 2
+
+
+# ============================================================================
+# CLUSTERED DATA SUPPORT (for cluster-bootstrap confidence intervals)
+# ============================================================================
+# A "cluster" is any unit that can contribute more than one row to the dataset:
+# a patient with several encounters, a subject with several scans, an eye with
+# several images, a recruiting site contributing many cases. Rows within a
+# cluster are correlated, so confidence intervals must resample clusters rather
+# than rows. Cluster labels can arrive two ways:
+#   1. directly, as an array of cluster labels in the prediction JSON
+#   2. indirectly, as a per-row record id plus a CSV mapping record -> cluster
+
+# Keys searched for a direct per-row cluster label
+DIRECT_CLUSTER_KEYS = ('cluster_ids', 'group_ids', 'subject_ids', 'patient_ids')
+# Keys searched for a per-row record id, to be joined via --cluster-map
+RECORD_ID_KEYS = ('record_ids', 'encounter_ids', 'admission_ids', 'hadm_ids', 'ids')
+
+
+def _norm_id(value) -> str:
+    """Normalise an id to a string key so JSON and CSV forms compare equal.
+
+    JSON numeric ids often arrive as floats (12345.0) while a CSV holds '12345';
+    both must land on the same key.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if text.endswith('.0') and text[:-2].lstrip('-').isdigit():
+        return text[:-2]
+    return text
+
+
+def load_cluster_map(path: str, columns: Optional[str] = None) -> Dict[str, str]:
+    """Load a record-id -> cluster-id lookup from a CSV file.
+
+    Args:
+        path:    CSV file with a header row.
+        columns: 'record_id_column,cluster_id_column'. Defaults to the first two
+                 columns in the file, in that order.
+    """
+    csv_path = Path(path).expanduser().resolve()
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Cluster map not found: {csv_path}")
+
+    with open(csv_path, newline='') as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise ValueError(f"Cluster map {csv_path} is empty")
+
+        if columns:
+            names = [c.strip() for c in columns.split(',')]
+            if len(names) != 2:
+                raise ValueError(
+                    f"--cluster-map-cols expects exactly two comma-separated column names, "
+                    f"got {columns!r}"
+                )
+            missing = [n for n in names if n not in header]
+            if missing:
+                raise ValueError(
+                    f"{csv_path}: column(s) {missing} not found. Header is: {header}"
+                )
+            i_record, i_cluster = header.index(names[0]), header.index(names[1])
+        else:
+            if len(header) < 2:
+                raise ValueError(f"{csv_path}: need at least two columns, header is {header}")
+            i_record, i_cluster = 0, 1
+            print(f"Note: --cluster-map-cols not given; reading '{header[0]}' as the record id "
+                  f"and '{header[1]}' as the cluster id.")
+
+        mapping = {}
+        for row in reader:
+            if len(row) <= max(i_record, i_cluster):
+                continue
+            mapping[_norm_id(row[i_record])] = _norm_id(row[i_cluster])
+
+    if not mapping:
+        raise ValueError(f"{csv_path}: no data rows found")
+    print(f"Loaded cluster map: {len(mapping):,} record ids from {csv_path.name}")
+    return mapping
+
+
+def extract_cluster_ids(data: dict, n_rows: int, source: str,
+                        cluster_key: Optional[str] = None,
+                        id_key: Optional[str] = None,
+                        cluster_map: Optional[Dict[str, str]] = None,
+                        announce: bool = False) -> Optional[np.ndarray]:
+    """Resolve per-row cluster labels for one prediction file.
+
+    Returns None when no cluster information is available, which the caller
+    treats as "resample rows independently".
+    """
+    if cluster_key:
+        if cluster_key not in data:
+            raise KeyError(
+                f"{source}: --cluster-key '{cluster_key}' not present. "
+                f"Available keys: {sorted(data)}"
+            )
+        ids = [_norm_id(v) for v in data[cluster_key]]
+
+    elif cluster_map is not None:
+        key = id_key
+        if key is None:
+            key = next((k for k in RECORD_ID_KEYS if k in data), None)
+            if key is None:
+                raise KeyError(
+                    f"{source}: --cluster-map was given but no per-row record id array was "
+                    f"found. Pass --id-key naming one of: {sorted(data)}"
+                )
+            if announce:
+                print(f"Note: joining on '{key}' as the per-row record id.")
+        if key not in data:
+            raise KeyError(
+                f"{source}: --id-key '{key}' not present. Available keys: {sorted(data)}"
+            )
+        raw = [_norm_id(v) for v in data[key]]
+        unmapped = {r for r in raw if r not in cluster_map}
+        if unmapped:
+            example = sorted(unmapped)[:3]
+            raise KeyError(
+                f"{source}: {len(unmapped)} distinct record id(s) are absent from the cluster "
+                f"map (e.g. {example}). Every row needs a cluster, otherwise the interval "
+                f"would silently mix clustered and unclustered rows."
+            )
+        ids = [cluster_map[r] for r in raw]
+
+    else:
+        key = next((k for k in DIRECT_CLUSTER_KEYS if k in data), None)
+        if key is None:
+            return None
+        if announce:
+            print(f"Note: found '{key}' in the predictions; using it as the cluster label.")
+        ids = [_norm_id(v) for v in data[key]]
+
+    if len(ids) != n_rows:
+        raise ValueError(
+            f"{source}: got {len(ids)} cluster ids for {n_rows} predictions"
+        )
+    return np.array(ids, dtype=object)
 
 
 def resolve_input_dir(input_dir: str) -> Path:
@@ -131,8 +274,13 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
                    threshold_range: Tuple[float, float] = (0.0, 0.5),
                    output_dir: Optional[str] = None,
                    threshold: Optional[float] = None,
-                   recalibrate: bool = False) -> Tuple[Dict[str, float], np.ndarray]:
-    """Generate all recommended evaluation plots and metrics"""
+                   recalibrate: bool = False,
+                   n_train: Optional[int] = None) -> Tuple[Dict[str, float], np.ndarray]:
+    """Generate all recommended evaluation plots and metrics
+
+    n_train, when supplied, is recorded in the metrics so that the Nadeau-Bengio
+    correction can use the measured training-set size instead of assuming it.
+    """
 
     if recalibrate:
         # Perform logistic recalibration (Platt scaling)
@@ -173,6 +321,9 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
         'calibration_slope': cal_slope,
         'brier_score': brier
     }
+
+    if n_train is not None:
+        metrics['n_train'] = int(n_train)
 
     if threshold is not None:
         # Calculate additional metrics at the given threshold
@@ -215,7 +366,12 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
 # CROSS-VALIDATION AND MULTIPLE EXPERIMENT SUPPORT (for command line usage)
 # ============================================================================
 
-def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None,
+                              n_boot: int = 0, cluster_key: Optional[str] = None,
+                              id_key: Optional[str] = None,
+                              cluster_map: Optional[Dict[str, str]] = None,
+                              ci_level: float = 0.95, seed: int = 0
+                              ) -> Tuple[np.ndarray, np.ndarray, Optional[dict]]:
     """Evaluate all folds and aggregate results"""
     input_path = resolve_input_dir(input_dir)
 
@@ -229,9 +385,11 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     all_metrics = []
     pooled_y_true = []
     pooled_y_prob = []
+    pooled_cluster_ids = []
+    clusters_available = True
 
     # Evaluate each fold
-    for json_file in json_files:
+    for fold_idx, json_file in enumerate(json_files):
         fold_name = json_file.stem.replace('_predictions', '')
         print(f"Evaluating {fold_name}...")
 
@@ -240,23 +398,39 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         y_true = np.array(data_test['y_true'])
         y_prob = np.array(data_test['y_proba'])
 
-        # Training predictions are only needed to fit the recalibration map
+        # Training predictions serve two purposes: fitting the recalibration map
+        # (required for --recalibrate) and supplying the measured training-set
+        # size for the Nadeau-Bengio correction (useful whenever available).
         y_train_true = y_train_prob = None
-        if recalibrate:
-            train_file = json_file.with_name(json_file.name.replace('fold_', 'train_', 1))
-            if not train_file.exists():
-                raise FileNotFoundError(
-                    f"--recalibrate needs training predictions, but '{train_file.name}' was not "
-                    f"found in {train_file.parent}. Either save train_*_predictions.json alongside "
-                    f"your fold_*_predictions.json (see README), or drop --recalibrate."
-                )
+        n_train = None
+        train_file = json_file.with_name(json_file.name.replace('fold_', 'train_', 1))
+        if train_file.exists():
             with open(train_file, 'r') as f:
                 data_train = json.load(f)
             y_train_true = np.array(data_train['y_true'])
             y_train_prob = np.array(data_train['y_proba'])
+            n_train = int(y_train_true.size)
+        elif recalibrate:
+            raise FileNotFoundError(
+                f"--recalibrate needs training predictions, but '{train_file.name}' was not "
+                f"found in {train_file.parent}. Either save train_*_predictions.json alongside "
+                f"your fold_*_predictions.json (see README), or drop --recalibrate."
+            )
+
+        # Cluster labels for the bootstrap, if the caller asked for one
+        if n_boot and clusters_available:
+            cluster_ids = extract_cluster_ids(
+                data_test, y_true.size, source=str(json_file),
+                cluster_key=cluster_key, id_key=id_key, cluster_map=cluster_map,
+                announce=(fold_idx == 0),
+            )
+            if cluster_ids is None:
+                clusters_available = False
+            else:
+                pooled_cluster_ids.extend(cluster_ids)
 
         fold_dir = os.path.join(str(input_path), fold_name)
-        metrics, y_prob = evaluate_model(y_true, y_prob, y_train_true, y_train_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate) 
+        metrics, y_prob = evaluate_model(y_true, y_prob, y_train_true, y_train_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate, n_train=n_train)
         all_metrics.append(metrics)
 
         pooled_y_true.extend(y_true)
@@ -289,14 +463,57 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'), threshold=threshold)
     risk_distribution(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_risk_distribution.png'))
 
+    # Bootstrap confidence intervals on the pooled out-of-fold predictions
+    boot = None
+    if n_boot:
+        cluster_ids = None
+        if clusters_available and pooled_cluster_ids:
+            cluster_ids = np.array(pooled_cluster_ids, dtype=object)
+        else:
+            print("Warning: no cluster labels found — bootstrapping individual rows. If one "
+                  "subject can contribute more than one row, these intervals will be too "
+                  "narrow. See --cluster-key / --cluster-map in the README.")
+
+        unit = 'clusters' if cluster_ids is not None else 'rows'
+        print(f"\nBootstrapping {n_boot} resamples of {unit} "
+              f"(n={len(pooled_y_true):,})...")
+        results, meta = bootstrap_ci(pooled_y_true, pooled_y_prob, cluster_ids=cluster_ids,
+                                     n_boot=n_boot, threshold=threshold,
+                                     ci_level=ci_level, seed=seed)
+        boot = {'meta': meta, 'metrics': results}
+
+        if meta.get('effective_cluster_size') is not None:
+            print(f"  {meta['n_clusters']:,} clusters | mean size "
+                  f"{meta['mean_cluster_size']:.2f} | effective size "
+                  f"{meta['effective_cluster_size']:.2f} | max {meta['max_cluster_size']}")
+        pct = int(round(ci_level * 100))
+        for name in BOOTSTRAP_METRICS:
+            if name in results:
+                r = results[name]
+                print(f"  {name}: {r['point']:.4f}  ({pct}% CI {r['ci_lo']:.4f} to {r['ci_hi']:.4f})")
+
+        with open(os.path.join(str(input_path), 'bootstrap_ci.json'), 'w') as f:
+            json.dump(boot, f, indent=4)
+        print(f"✓ Bootstrap CIs saved to {os.path.join(str(input_path), 'bootstrap_ci.json')}")
+
     print("\n")
 
-    return pooled_y_prob, pooled_y_true
+    return pooled_y_prob, pooled_y_true, boot
 
 
 def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None,
-                       bengio_correction: bool = False, ordering: Optional[tuple] = None) -> None:
-    """Evaluate multiple experiments recursively and aggregate results."""
+                       bengio_correction: bool = False, ordering: Optional[tuple] = None,
+                       n_boot: int = 0, cluster_key: Optional[str] = None,
+                       id_key: Optional[str] = None,
+                       cluster_map: Optional[Dict[str, str]] = None,
+                       ci_level: float = 0.95, seed: int = 0,
+                       skip_failed: bool = False) -> None:
+    """Evaluate multiple experiments recursively and aggregate results.
+
+    If any experiment fails to evaluate, the run stops rather than quietly
+    producing overlay plots and comparison tables with that experiment missing.
+    Pass skip_failed=True to continue with whatever succeeded.
+    """
     input_path = resolve_input_dir(input_dir)
 
     if ordering is None:
@@ -343,17 +560,31 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     pooled_y_trues = []
     pooled_y_probs = []
 
+    failures = []
+
     for experiment_dir, legend_name in experiment_dirs_with_labels:
         print(f"Processing experiment: {experiment_dir.name}")
+
+        # An auto-discovered directory holding no predictions is simply not an
+        # experiment, so skip it quietly. A directory named in an explicit
+        # ordering is a different matter: the user asked for it by name.
+        if not ordering and not any(experiment_dir.rglob('fold_*_predictions.json')):
+            print(f"  no fold_*_predictions.json found — skipping (not an experiment)")
+            continue
+
         try:
-            pooled_y_prob, pooled_y_true = evaluate_cross_validation(str(experiment_dir), recalibrate=recalibrate, threshold=threshold)
+            pooled_y_prob, pooled_y_true, boot = evaluate_cross_validation(
+                str(experiment_dir), recalibrate=recalibrate, threshold=threshold,
+                n_boot=n_boot, cluster_key=cluster_key, id_key=id_key,
+                cluster_map=cluster_map, ci_level=ci_level, seed=seed)
 
             # Collect aggregate metrics from each experiment
             with open(Path(experiment_dir) / 'aggregate_metrics.json', 'r') as f:
                 experiment_metrics = json.load(f)
                 all_experiment_metrics.append({
                     'name': legend_name,
-                    'metrics': experiment_metrics
+                    'metrics': experiment_metrics,
+                    'bootstrap': boot
                 })
 
             pooled_y_trues.append(np.array(pooled_y_true))
@@ -361,6 +592,29 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
         except Exception as e:
             print(f"Warning: Failed to process {experiment_dir.name} ({type(e).__name__}: {e})")
+            failures.append((experiment_dir.name, legend_name, f"{type(e).__name__}: {e}"))
+
+    if failures and not skip_failed:
+        detail = '\n'.join(
+            f"  - {name}" + (f" (plot label '{label}')" if label != name else "") + f": {msg}"
+            for name, label, msg in failures
+        )
+        succeeded = [exp['name'] for exp in all_experiment_metrics]
+        raise RuntimeError(
+            f"{len(failures)} of {len(experiment_dirs_with_labels)} experiment(s) failed to "
+            f"evaluate:\n{detail}\n\n"
+            f"Succeeded: {succeeded if succeeded else 'none'}\n\n"
+            f"Stopping rather than writing overlay plots and comparison tables that silently "
+            f"omit the failed experiment(s) — a figure missing a model you asked for is worse "
+            f"than no figure. Fix the cause above, or pass --skip-failed to continue with only "
+            f"the experiments that succeeded."
+        )
+
+    if failures:
+        omitted = [name for name, _, _ in failures]
+        print(f"\nWarning: --skip-failed given, so continuing WITHOUT {len(failures)} "
+              f"experiment(s): {omitted}. Every overlay plot and comparison table below "
+              f"excludes them.")
 
     if not all_experiment_metrics:
         raise ValueError(
@@ -472,8 +726,15 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
         for metric_name, metric_values in exp_metrics['metrics'].items():
             row[f'{metric_name}_mean'] = metric_values['mean']
             row[f'{metric_name}_std'] = metric_values['std']
+        # Pooled point estimate and bootstrap CI, when a bootstrap was run
+        boot = exp_metrics.get('bootstrap')
+        if boot:
+            for metric_name, r in boot['metrics'].items():
+                row[f'{metric_name}_pooled'] = r['point']
+                row[f'{metric_name}_ci_lo'] = r['ci_lo']
+                row[f'{metric_name}_ci_hi'] = r['ci_hi']
         metrics_data.append(row)
-    
+
     metrics_df = pd.DataFrame(metrics_data)
     metrics_df.to_csv(overlay_dir / 'combined_metrics.csv', index=False)
     print(f"✓ Combined metrics saved to {overlay_dir / 'combined_metrics.csv'}")
@@ -481,26 +742,37 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     # Save combined metrics dataframe (value ± std format) -- for C+P into spreadsheets
     print("\n=== Saving Combined Metrics DataFrame (± format) ===")
     metrics_data_formatted = []
+    pct_label = int(round(ci_level * 100))
     for exp_metrics in all_experiment_metrics:
         row = {'experiment': exp_metrics['name']}
         for metric_name, metric_values in exp_metrics['metrics'].items():
             mean = metric_values['mean']
             std = metric_values['std']
-            # Format n as integer, prevalence with 1 decimal, others with 3 decimals
-            if metric_name == 'n':
+            # Format counts as integers, prevalence with 1 decimal, others with 3 decimals
+            if metric_name in ('n', 'n_train'):
                 row[metric_name] = f"{mean:.0f} (±{std:.0f})"
             elif metric_name == 'prevalence_pct':
                 row[metric_name] = f"{mean:.1f}% (±{std:.1f}%)"
             else:
                 row[metric_name] = f"{mean:.3f} (±{std:.3f})"
+        # Paper-ready 'point (95% CI lo to hi)' columns alongside the ± columns
+        boot = exp_metrics.get('bootstrap')
+        if boot:
+            for metric_name, r in boot['metrics'].items():
+                if metric_name == 'prevalence_pct':
+                    row[f'{metric_name}_ci'] = (f"{r['point']:.1f}% ({pct_label}% CI "
+                                                f"{r['ci_lo']:.1f}% to {r['ci_hi']:.1f}%)")
+                else:
+                    row[f'{metric_name}_ci'] = (f"{r['point']:.3f} ({pct_label}% CI "
+                                                f"{r['ci_lo']:.3f} to {r['ci_hi']:.3f})")
         metrics_data_formatted.append(row)
-    
+
     metrics_df_formatted = pd.DataFrame(metrics_data_formatted)
     metrics_df_formatted.to_csv(overlay_dir / 'combined_metrics_formatted.tsv', index=False, sep='\t')
     print(f"✓ Combined metrics (formatted) saved to {overlay_dir / 'combined_metrics_formatted.tsv'}")
 
     if bengio_correction:
-        bengio_correction_analysis(experiment_dirs_with_labels, overlay_dir)
+        bengio_correction_analysis(experiment_dirs_with_labels, overlay_dir, ci_level=ci_level)
 
 
 
@@ -509,9 +781,10 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 # ============================================================================
 
 # Metrics excluded from statistical comparison (not continuous performance measures)
-_SKIP_METRICS = {'n', 'prevalence_pct', 'tp', 'tn', 'fp', 'fn'}
+_SKIP_METRICS = {'n', 'n_train', 'prevalence_pct', 'tp', 'tn', 'fp', 'fn'}
 
-def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: Path) -> None:
+def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: Path,
+                               ci_level: float = 0.95) -> None:
     """
     Pairwise Nadeau-Bengio corrected t-tests across experiments.
 
@@ -555,8 +828,9 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
     if missing:
         print(f"Note: Folds {missing} not present in all experiments; using {k} common folds.")
 
-    # Estimate average n_test and n_train across folds
-    # In k-fold CV: n_total ≈ k * n_test, n_train ≈ (k-1) * n_test
+    # Average n_test and n_train across folds. n_train is read from the fold
+    # metrics when the training predictions were available; otherwise it falls
+    # back to the standard k-fold assumption n_train ≈ (k-1) * n_test.
     all_n = [
         fold_metrics[fold]['n']
         for fold_metrics in experiment_fold_metrics.values()
@@ -564,9 +838,22 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
         if 'n' in fold_metrics.get(fold, {})
     ]
     n_test = float(np.mean(all_n))
-    n_train = n_test * (k - 1)  # standard k-fold assumption
 
-    print(f"Folds: {k}  |  avg n_test: {n_test:.0f}  |  avg n_train: {n_train:.0f}")
+    all_n_train = [
+        fold_metrics[fold]['n_train']
+        for fold_metrics in experiment_fold_metrics.values()
+        for fold in common_folds
+        if 'n_train' in fold_metrics.get(fold, {})
+    ]
+    if all_n_train:
+        n_train = float(np.mean(all_n_train))
+        n_train_source = 'measured'
+    else:
+        n_train = n_test * (k - 1)
+        n_train_source = 'assumed (k-1)*n_test — save train_*_predictions.json to measure it'
+
+    print(f"Folds: {k}  |  avg n_test: {n_test:.0f}  |  avg n_train: {n_train:.0f} "
+          f"[{n_train_source}]")
 
     # Determine which metrics to compare
     first_exp = next(iter(experiment_fold_metrics.values()))
@@ -582,7 +869,8 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
             if j <= i:
                 continue
             row = {'experiment_A': name_a, 'experiment_B': name_b, 'k_folds': k,
-                   'avg_n_test': round(n_test), 'avg_n_train': round(n_train)}
+                   'avg_n_test': round(n_test), 'avg_n_train': round(n_train),
+                   'n_train_source': n_train_source.split(' ')[0]}
             for metric in compare_metrics:
                 diffs = []
                 for fold in common_folds:
@@ -591,11 +879,22 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
                     if ma is not None and mb is not None:
                         diffs.append(ma - mb)
                 if len(diffs) >= 2:
-                    t_stat, p_val = bengio_nadeau_test(diffs, n_test, n_train)
-                    row[f'{metric}_mean_diff(A-B)'] = round(float(np.mean(diffs)), 5)
+                    t_stat, p_val, ci_lo, ci_hi = bengio_nadeau_test(
+                        diffs, n_test, n_train, ci_level=ci_level)
+                    mean_diff = float(np.mean(diffs))
+                    row[f'{metric}_mean_diff(A-B)'] = round(mean_diff, 5)
+                    row[f'{metric}_ci_lo'] = round(ci_lo, 5) if not np.isnan(ci_lo) else np.nan
+                    row[f'{metric}_ci_hi'] = round(ci_hi, 5) if not np.isnan(ci_hi) else np.nan
                     row[f'{metric}_t'] = round(t_stat, 4) if not np.isnan(t_stat) else np.nan
-                    row[f'{metric}_p'] = round(p_val, 5) if not np.isnan(p_val) else np.nan
+                    # Kept at full float precision rather than rounded, so that
+                    # very small p-values are not flattened to 0.0 in the table
+                    row[f'{metric}_p'] = float(p_val) if not np.isnan(p_val) else np.nan
                     row[f'{metric}_sig_p05'] = (p_val < 0.05) if not np.isnan(p_val) else False
+                    if not (np.isnan(ci_lo) or np.isnan(ci_hi)):
+                        row[f'{metric}_formatted'] = (
+                            f"{mean_diff:+.4f} ({int(round(ci_level * 100))}% CI "
+                            f"{ci_lo:+.4f} to {ci_hi:+.4f})"
+                        )
             rows.append(row)
 
     results_df = pd.DataFrame(rows)
@@ -620,13 +919,17 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
         print(f"✓ AUROC p-value matrix saved to {matrix_path}")
 
     # Print summary to console
-    print("\nPairwise AUROC comparisons (Bengio-Nadeau corrected, two-tailed):")
+    pct_label = int(round(ci_level * 100))
+    print(f"\nPairwise AUROC comparisons (Bengio-Nadeau corrected, two-tailed, "
+          f"{pct_label}% CI):")
     for row in rows:
         diff = row.get('auroc_mean_diff(A-B)', np.nan)
+        lo = row.get('auroc_ci_lo', np.nan)
+        hi = row.get('auroc_ci_hi', np.nan)
         p = row.get('auroc_p', np.nan)
         sig = '*' if row.get('auroc_sig_p05', False) else ' '
         print(f"  {sig} {row['experiment_A']} vs {row['experiment_B']}: "
-              f"Δ={diff:+.4f}, p={p:.4f}")
+              f"Δ={diff:+.4f} ({lo:+.4f} to {hi:+.4f}), p={p:.3g}")
 
 
 # ============================================================================
@@ -651,6 +954,31 @@ if __name__ == '__main__':
                         help='JSON file mapping experiment directory name -> plot label, which also '
                              'defines overlay plot ordering and filters to just those experiments '
                              '(requires --recurse). Omit to use every subdirectory alphabetically.')
+    parser.add_argument('--bootstrap', type=int, default=0, metavar='N',
+                        help='Compute bootstrap confidence intervals from N resamples of the pooled '
+                             'out-of-fold predictions (e.g. 2000). Default 0 = off.')
+    parser.add_argument('--cluster-key', type=str, default=None,
+                        help='Key in the prediction JSON holding a per-row cluster label (e.g. '
+                             '"subject_ids"). Rows sharing a label are resampled together.')
+    parser.add_argument('--id-key', type=str, default=None,
+                        help='Key in the prediction JSON holding a per-row record id, joined to '
+                             'cluster labels via --cluster-map.')
+    parser.add_argument('--cluster-map', type=str, default=None,
+                        help='CSV file mapping record id -> cluster id, used with --id-key when the '
+                             'cluster label is not stored in the prediction JSON itself.')
+    parser.add_argument('--cluster-map-cols', type=str, default=None, metavar='ID,CLUSTER',
+                        help='Column names in --cluster-map for the record id and cluster id. '
+                             'Defaults to the first two columns of the file.')
+    parser.add_argument('--ci-level', type=float, default=0.95,
+                        help='Confidence level for bootstrap and Nadeau-Bengio intervals '
+                             '(default 0.95).')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Seed for bootstrap resampling, for reproducible intervals '
+                             '(default 0).')
+    parser.add_argument('--skip-failed', action='store_true',
+                        help='Continue when an experiment fails to evaluate, instead of stopping. '
+                             'Overlay plots and comparison tables will then silently omit it, so '
+                             'this is for exploratory runs, not for figures you intend to publish.')
 
     args = parser.parse_args()
 
@@ -660,9 +988,43 @@ if __name__ == '__main__':
     if args.ordering and not args.recurse:
         parser.error('--ordering requires --recurse')
 
+    if args.skip_failed and not args.recurse:
+        parser.error('--skip-failed requires --recurse')
+
+    if args.bootstrap < 0:
+        parser.error('--bootstrap must be a non-negative number of resamples')
+
+    if not 0 < args.ci_level < 1:
+        parser.error('--ci-level must be strictly between 0 and 1 (e.g. 0.95)')
+
+    if args.cluster_key and (args.cluster_map or args.id_key):
+        parser.error('--cluster-key is mutually exclusive with --cluster-map/--id-key: '
+                     'either the labels are in the JSON, or they are joined from a CSV')
+
+    if args.id_key and not args.cluster_map:
+        parser.error('--id-key is only meaningful with --cluster-map')
+
+    if args.cluster_map_cols and not args.cluster_map:
+        parser.error('--cluster-map-cols requires --cluster-map')
+
+    cluster_args = (args.cluster_key, args.cluster_map, args.id_key)
+    if any(cluster_args) and not args.bootstrap:
+        parser.error('cluster options only apply to bootstrap intervals; pass --bootstrap N')
+
+    cluster_map = (load_cluster_map(args.cluster_map, args.cluster_map_cols)
+                   if args.cluster_map else None)
+
     if args.recurse:
         evaluate_recursive(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold,
                            bengio_correction=args.bengio_correction,
-                           ordering=load_ordering(args.ordering))
+                           ordering=load_ordering(args.ordering),
+                           n_boot=args.bootstrap, cluster_key=args.cluster_key,
+                           id_key=args.id_key, cluster_map=cluster_map,
+                           ci_level=args.ci_level, seed=args.seed,
+                           skip_failed=args.skip_failed)
     else:
-        evaluate_cross_validation(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold)
+        evaluate_cross_validation(args.input_dir, recalibrate=args.recalibrate,
+                                  threshold=args.threshold,
+                                  n_boot=args.bootstrap, cluster_key=args.cluster_key,
+                                  id_key=args.id_key, cluster_map=cluster_map,
+                                  ci_level=args.ci_level, seed=args.seed)

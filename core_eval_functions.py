@@ -14,7 +14,8 @@ warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_m
 # STATISTICAL COMPARISON (Nadeau & Bengio, 1999)
 # ============================================================================
 
-def bengio_nadeau_test(diffs: List[float], n_test: float, n_train: float) -> Tuple[float, float]:
+def bengio_nadeau_test(diffs: List[float], n_test: float, n_train: float,
+                       ci_level: float = 0.95) -> Tuple[float, float, float, float]:
     """
     Corrected paired t-test for comparing cross-validated models (Nadeau & Bengio, 1999).
 
@@ -22,25 +23,197 @@ def bengio_nadeau_test(diffs: List[float], n_test: float, n_train: float) -> Tup
     folds share training data. This correction multiplies the sample variance by
     (1/k + n_test/n_train) before computing the t-statistic.
 
+    The same corrected standard error yields a confidence interval on the mean
+    difference. It is built from the identical variance estimate as the p-value,
+    so the interval excludes zero exactly when p < (1 - ci_level).
+
     Args:
-        diffs:   Per-fold metric differences (model_A - model_B), length k.
-        n_test:  Average number of test samples per fold.
-        n_train: Average number of training samples per fold.
+        diffs:    Per-fold metric differences (model_A - model_B), length k.
+        n_test:   Average number of test samples per fold.
+        n_train:  Average number of training samples per fold.
+        ci_level: Confidence level for the interval (default 0.95).
 
     Returns:
-        (t_stat, p_value) two-tailed. Returns (nan, nan) if undetermined.
+        (t_stat, p_value, ci_lo, ci_hi), two-tailed. Returns all-nan if undetermined.
     """
     k = len(diffs)
     if k < 2:
-        return np.nan, np.nan
-    mean_d = np.mean(diffs)
+        return np.nan, np.nan, np.nan, np.nan
+    mean_d = float(np.mean(diffs))
     var_d = np.var(diffs, ddof=1)
     corrected_var = (1 / k + n_test / n_train) * var_d
     if corrected_var <= 0:
-        return np.nan, np.nan
-    t_stat = mean_d / np.sqrt(corrected_var)
+        # Every fold gave an identical difference: the t-statistic is undefined,
+        # but the interval collapses to the point estimate.
+        return np.nan, np.nan, mean_d, mean_d
+    se = float(np.sqrt(corrected_var))
+    t_stat = mean_d / se
     p_value = 2 * stats.t.sf(abs(t_stat), df=k - 1)
-    return float(t_stat), float(p_value)
+    t_crit = stats.t.ppf(1 - (1 - ci_level) / 2, df=k - 1)
+    return float(t_stat), float(p_value), mean_d - t_crit * se, mean_d + t_crit * se
+
+
+# ============================================================================
+# BOOTSTRAP CONFIDENCE INTERVALS
+# ============================================================================
+
+# Rates and scores, which keep their meaning under resampling. Raw counts
+# (n, tp, tn, fp, fn) are deliberately excluded: a count computed on a resample
+# of different size is not comparable to the count on the original data.
+BOOTSTRAP_METRICS = (
+    'prevalence_pct', 'auroc', 'calibration_slope', 'brier_score',
+    'alert_rate', 'sensitivity', 'specificity', 'ppv', 'npv',
+)
+
+
+def _fast_auroc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """AUROC via the Mann-Whitney rank statistic.
+
+    Equivalent to sklearn's roc_auc_score (including tie handling, since
+    scipy's rankdata assigns average ranks) but avoids rebuilding an ROC
+    curve on every bootstrap resample.
+    """
+    n_pos = int(y_true.sum())
+    n_neg = int(y_true.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+    ranks = stats.rankdata(y_prob)
+    return float((ranks[y_true == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _fast_calibration_slope(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Cox calibration slope: unregularised logistic regression on the logits."""
+    if np.unique(y_true).size < 2:
+        return np.nan
+    p = np.clip(y_prob, 1e-7, 1 - 1e-7)
+    logit = np.log(p / (1 - p))
+    # C=inf is the unregularised fit; spelled this way rather than penalty=None,
+    # which sklearn deprecated in 1.8.
+    lr = LogisticRegression(C=np.inf, solver='lbfgs', max_iter=1000)
+    lr.fit(logit.reshape(-1, 1), y_true)
+    return float(lr.coef_[0][0])
+
+
+def resample_metrics(y_true: np.ndarray, y_prob: np.ndarray,
+                     threshold: Optional[float] = None) -> dict:
+    """Compute the bootstrappable metrics for one (re)sample.
+
+    Definitions mirror evaluate_model() in ldh_eval.py, except that degenerate
+    denominators return nan rather than 0 so that such draws can be dropped
+    from the percentile calculation instead of biasing it toward zero.
+    """
+    out = {
+        'prevalence_pct': float(np.mean(y_true) * 100),
+        'auroc': _fast_auroc(y_true, y_prob),
+        'calibration_slope': _fast_calibration_slope(y_true, y_prob),
+        'brier_score': float(np.mean((y_prob - y_true) ** 2)),
+    }
+
+    if threshold is not None:
+        pred = y_prob >= threshold
+        tp = int(np.sum(pred & (y_true == 1)))
+        tn = int(np.sum(~pred & (y_true == 0)))
+        fp = int(np.sum(pred & (y_true == 0)))
+        fn = int(np.sum(~pred & (y_true == 1)))
+        out.update({
+            'alert_rate': float((tp + fp) / y_true.size),
+            'sensitivity': float(tp / (tp + fn)) if (tp + fn) > 0 else np.nan,
+            'specificity': float(tn / (tn + fp)) if (tn + fp) > 0 else np.nan,
+            'ppv': float(tp / (tp + fp)) if (tp + fp) > 0 else np.nan,
+            'npv': float(tn / (tn + fn)) if (tn + fn) > 0 else np.nan,
+        })
+
+    return out
+
+
+def bootstrap_ci(y_true: np.ndarray, y_prob: np.ndarray,
+                 cluster_ids: Optional[np.ndarray] = None,
+                 n_boot: int = 2000, threshold: Optional[float] = None,
+                 ci_level: float = 0.95, seed: int = 0) -> Tuple[dict, dict]:
+    """Percentile bootstrap confidence intervals for the evaluation metrics.
+
+    If cluster_ids is given, resampling draws *clusters* with replacement and
+    keeps every row belonging to a drawn cluster (the cluster, or block,
+    bootstrap). This is required whenever one unit can contribute more than one
+    row -- a patient with several encounters, an eye with several images, a site
+    contributing many cases. Resampling rows independently in that situation
+    treats correlated rows as independent and yields intervals that are too
+    narrow.
+
+    Args:
+        y_true:      Binary outcomes.
+        y_prob:      Predicted probabilities.
+        cluster_ids: Per-row cluster label. None resamples rows independently.
+        n_boot:      Number of bootstrap resamples.
+        threshold:   If given, also bootstrap the threshold-dependent metrics.
+        ci_level:    Confidence level (default 0.95).
+        seed:        Seed for reproducible resampling.
+
+    Returns:
+        (results, meta) where results maps metric -> {point, ci_lo, ci_hi,
+        boot_sd, n_valid_draws} and meta describes how the bootstrap was run.
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    n = int(y_true.size)
+    rng = np.random.default_rng(seed)
+
+    groups = None
+    if cluster_ids is not None:
+        cluster_ids = np.asarray(cluster_ids)
+        if cluster_ids.size != n:
+            raise ValueError(
+                f"cluster_ids has {cluster_ids.size} entries but there are {n} predictions"
+            )
+        # Row indices grouped by cluster, so a draw is a concatenation of blocks
+        order = np.argsort(cluster_ids, kind='stable')
+        _, starts = np.unique(cluster_ids[order], return_index=True)
+        groups = np.split(order, starts[1:])
+
+    draws: dict = {}
+    for _ in range(n_boot):
+        if groups is None:
+            idx = rng.integers(0, n, n)
+        else:
+            picked = rng.integers(0, len(groups), len(groups))
+            idx = np.concatenate([groups[k] for k in picked])
+        for key, val in resample_metrics(y_true[idx], y_prob[idx], threshold).items():
+            draws.setdefault(key, []).append(val)
+
+    lo_pct = (1 - ci_level) / 2 * 100
+    hi_pct = 100 - lo_pct
+    point = resample_metrics(y_true, y_prob, threshold)
+
+    results = {}
+    for key, vals in draws.items():
+        arr = np.asarray(vals, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+        results[key] = {
+            'point': point.get(key),
+            'ci_lo': float(np.percentile(arr, lo_pct)),
+            'ci_hi': float(np.percentile(arr, hi_pct)),
+            'boot_sd': float(arr.std(ddof=1)) if arr.size > 1 else np.nan,
+            'n_valid_draws': int(arr.size),
+        }
+
+    meta = {
+        'n_boot': n_boot,
+        'ci_level': ci_level,
+        'resample_unit': 'cluster' if groups is not None else 'row',
+        'n_rows': n,
+        'n_clusters': int(len(groups)) if groups is not None else None,
+    }
+    if groups is not None:
+        sizes = np.array([g.size for g in groups], dtype=float)
+        meta['mean_cluster_size'] = float(sizes.mean())
+        meta['max_cluster_size'] = int(sizes.max())
+        # Variance inflation under clustering tracks this, not the mean:
+        # a long tail of large clusters matters more than the average.
+        meta['effective_cluster_size'] = float((sizes ** 2).sum() / sizes.sum())
+
+    return results, meta
 
 
 # ============================================================================
