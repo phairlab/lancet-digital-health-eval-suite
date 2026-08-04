@@ -29,24 +29,27 @@ warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_m
 
 # ============================================================================
 # FOR RECURSIVE EVALUATION ACROSS MULTIPLE EXPERIMENTS
-# Define consistent ordering and naming for experiments when generating overlay plots
-#    shorten names for legend labels
-#    use ordering in tuples
-#    filtering to use only experiments defined in consistent ordering
-# element 1 of each tuple is the experiment directory name, element 2 is how you want it labeled in plots
+# Controls which experiments appear in overlay plots, in what order, and under
+# what legend label. Experiments not named here are excluded from the overlays.
+#
+# The default is empty, meaning: use every subdirectory, alphabetically, labeled
+# by directory name. To pin an ordering, pass --ordering with a JSON file (see
+# example_ordering.json), or set the tuple below for a project-local default.
+# Element 1 of each tuple is the directory name, element 2 is the plot label.
 
-# consistent_ordering = ()
-consistent_ordering = ( 
-    ("LACE","LACE"),
-    ("LACE-C","LACE-C"),
-    ("A0","A0"),
-    ("A1","A1"),
-    ("AH","AH"),
-    ("D0","D0"),
-    ("D1","D1"),
-)  # example 1
+consistent_ordering = ()
 
-# consistent_ordering = ( 
+# consistent_ordering = (
+#     ("LACE","LACE"),
+#     ("LACE-C","LACE-C"),
+#     ("A0","A0"),
+#     ("A1","A1"),
+#     ("AH","AH"),
+#     ("D0","D0"),
+#     ("D1","D1"),
+# )  # example 1
+
+# consistent_ordering = (
 #     ("AH","AH"),
 #     ("D1_removedtop0percent","D1: Remove Top 0%"),
 #     ("D1_removedtop5percent","D1: Remove Top 5%"),
@@ -60,6 +63,65 @@ consistent_ordering = (
 #     ("D1_removedtop45percent","D1: Remove Top 45%"),
 #     ("D1_removedtop50percent","D1: Remove Top 50%"),
 # )  # example 2
+
+
+def resolve_input_dir(input_dir: str) -> Path:
+    """Resolve an input directory, tolerating an absolute path with its leading '/' stripped.
+
+    Tries the path as given first (absolute, or relative to the current working
+    directory). If that does not exist and the path is relative, retries it as
+    root-anchored -- so 'Users/me/experiments' still finds '/Users/me/experiments'.
+    """
+    path = Path(input_dir).expanduser()
+
+    if path.is_absolute():
+        resolved = path.resolve()
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"Input directory not found: {resolved}")
+        return resolved
+
+    cwd_candidate = (Path.cwd() / path).resolve()
+    if cwd_candidate.is_dir():
+        return cwd_candidate
+
+    root_candidate = Path('/').joinpath(path).resolve()
+    if root_candidate.is_dir():
+        print(f"Note: reading '{input_dir}' as the absolute path {root_candidate}")
+        return root_candidate
+
+    raise FileNotFoundError(
+        f"Input directory '{input_dir}' not found. Tried:\n"
+        f"  {cwd_candidate}\n"
+        f"  {root_candidate}"
+    )
+
+
+def load_ordering(ordering_path: Optional[str]) -> tuple:
+    """Load experiment ordering/labels from JSON, falling back to consistent_ordering.
+
+    Accepts either an object mapping directory name -> plot label (key order is
+    preserved) or a list of [directory_name, plot_label] pairs.
+    """
+    if ordering_path is None:
+        return consistent_ordering
+
+    path = Path(ordering_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Ordering file not found: {path}")
+
+    with open(path, 'r') as f:
+        raw = json.load(f)
+
+    if isinstance(raw, dict):
+        return tuple(raw.items())
+    if isinstance(raw, list):
+        try:
+            return tuple((str(name), str(label)) for name, label in raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"{path}: list entries must be [directory_name, plot_label] pairs ({e})"
+            ) from e
+    raise ValueError(f"{path}: expected a JSON object or a list of pairs, got {type(raw).__name__}")
 
 
 # ============================================================================
@@ -155,9 +217,7 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
 
 def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Evaluate all folds and aggregate results"""
-    input_path = Path(input_dir).expanduser()
-    if not input_path.is_absolute():
-        input_path = Path('/').joinpath(input_path)
+    input_path = resolve_input_dir(input_dir)
 
     json_files = sorted(input_path.rglob('fold_*_predictions.json'))
     # print(json_files)
@@ -180,11 +240,20 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         y_true = np.array(data_test['y_true'])
         y_prob = np.array(data_test['y_proba'])
 
-        train_file_name = str(json_file).replace("fold_", "train_")
-        with open(train_file_name, 'r') as f:
-            data_train = json.load(f)
-        y_train_true = np.array(data_train['y_true'])
-        y_train_prob = np.array(data_train['y_proba'])
+        # Training predictions are only needed to fit the recalibration map
+        y_train_true = y_train_prob = None
+        if recalibrate:
+            train_file = json_file.with_name(json_file.name.replace('fold_', 'train_', 1))
+            if not train_file.exists():
+                raise FileNotFoundError(
+                    f"--recalibrate needs training predictions, but '{train_file.name}' was not "
+                    f"found in {train_file.parent}. Either save train_*_predictions.json alongside "
+                    f"your fold_*_predictions.json (see README), or drop --recalibrate."
+                )
+            with open(train_file, 'r') as f:
+                data_train = json.load(f)
+            y_train_true = np.array(data_train['y_true'])
+            y_train_prob = np.array(data_train['y_proba'])
 
         fold_dir = os.path.join(str(input_path), fold_name)
         metrics, y_prob = evaluate_model(y_true, y_prob, y_train_true, y_train_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate) 
@@ -204,7 +273,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         print(f"{metric}: {mean:.3f} ± {std:.3f}")
 
     # Save aggregate metrics to JSON
-    with open(os.path.join(input_dir, 'aggregate_metrics.json'), 'w') as f:
+    with open(os.path.join(str(input_path), 'aggregate_metrics.json'), 'w') as f:
         json.dump(aggregate, f, indent=4)
 
 
@@ -212,7 +281,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     pooled_y_true = np.array(pooled_y_true)
     pooled_y_prob = np.array(pooled_y_prob)
 
-    pooled_dir = input_dir  # Save in the same directory as aggregate_metrics.json
+    pooled_dir = str(input_path)  # Save in the same directory as aggregate_metrics.json
     os.makedirs(pooled_dir, exist_ok=True)
 
     auroc(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_auroc.png'))
@@ -226,27 +295,42 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 
 
 def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None,
-                       bengio_correction: bool = False) -> None:
+                       bengio_correction: bool = False, ordering: Optional[tuple] = None) -> None:
     """Evaluate multiple experiments recursively and aggregate results."""
-    input_path = Path(input_dir).expanduser()
-    if not input_path.is_absolute():
-        input_path = Path('/').joinpath(input_path)
+    input_path = resolve_input_dir(input_dir)
 
-    experiment_dirs = [d for d in input_path.iterdir() if d.is_dir()]
+    if ordering is None:
+        ordering = consistent_ordering
+
+    # 'overlay_results*' dirs hold this script's own output, not experiments
+    experiment_dirs = [
+        d for d in input_path.iterdir()
+        if d.is_dir() and not d.name.startswith('overlay_results')
+    ]
 
     if not experiment_dirs:
         raise ValueError(f"No experiment directories found in {input_path}")
 
-    # Use consistent_ordering if defined, otherwise sort alphabetically
-    if consistent_ordering:
-        # Create a mapping from dir name to legend name
-        ordering_dict = {dir_name: legend_name for dir_name, legend_name in consistent_ordering}
-        # Filter and order experiment_dirs based on consistent_ordering
-        ordered_dirs = []
-        for dir_name, legend_name in consistent_ordering:
-            matching = [d for d in experiment_dirs if d.name == dir_name]
-            if matching:
-                ordered_dirs.append((matching[0], legend_name))
+    # Use the configured ordering if defined, otherwise sort alphabetically
+    if ordering:
+        found_names = {d.name for d in experiment_dirs}
+        ordered_dirs = [
+            (next(d for d in experiment_dirs if d.name == dir_name), legend_name)
+            for dir_name, legend_name in ordering
+            if dir_name in found_names
+        ]
+        if not ordered_dirs:
+            raise ValueError(
+                f"None of the {len(ordering)} experiment names in the configured ordering matched "
+                f"a subdirectory of {input_path}.\n"
+                f"  Ordering expects: {sorted(name for name, _ in ordering)}\n"
+                f"  Directories found: {sorted(found_names)}\n"
+                f"Pass --ordering with a JSON file matching your directory names, or clear the "
+                f"ordering to use every subdirectory alphabetically."
+            )
+        missing = [name for name, _ in ordering if name not in found_names]
+        if missing:
+            print(f"Note: no directory found for ordering entries {missing}; skipping them.")
         experiment_dirs_with_labels = ordered_dirs
     else:
         # Sort experiment directories alphabetically and use dir name as label
@@ -276,8 +360,13 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
             pooled_y_probs.append(np.array(pooled_y_prob))
 
         except Exception as e:
-            print(f"Warning: Failed to process {experiment_dir.name} ({e})")
+            print(f"Warning: Failed to process {experiment_dir.name} ({type(e).__name__}: {e})")
 
+    if not all_experiment_metrics:
+        raise ValueError(
+            f"None of the {len(experiment_dirs_with_labels)} experiment(s) in {input_path} could be "
+            f"evaluated — see the warnings above for the per-experiment cause."
+        )
 
     # Generate overlay plots across all experiments
     print("\n=== Generating Overlay Plots Across All Experiments ===")
@@ -558,14 +647,22 @@ if __name__ == '__main__':
                         help='Threshold for classification metrics (e.g., sensitivity, specificity)')
     parser.add_argument('--bengio-correction', action='store_true',
                         help='Run Nadeau-Bengio corrected pairwise t-tests across experiments (requires --recurse)')
+    parser.add_argument('--ordering', type=str, default=None,
+                        help='JSON file mapping experiment directory name -> plot label, which also '
+                             'defines overlay plot ordering and filters to just those experiments '
+                             '(requires --recurse). Omit to use every subdirectory alphabetically.')
 
     args = parser.parse_args()
 
     if args.bengio_correction and not args.recurse:
         parser.error('--bengio-correction requires --recurse')
 
+    if args.ordering and not args.recurse:
+        parser.error('--ordering requires --recurse')
+
     if args.recurse:
         evaluate_recursive(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold,
-                           bengio_correction=args.bengio_correction)
+                           bengio_correction=args.bengio_correction,
+                           ordering=load_ordering(args.ordering))
     else:
         evaluate_cross_validation(args.input_dir, recalibrate=args.recalibrate, threshold=args.threshold)

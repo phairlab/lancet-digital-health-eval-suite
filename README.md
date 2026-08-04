@@ -115,8 +115,16 @@ This saves the in-fold plots and numbers in each individual fold's sub-folder, a
 
 Other arguments:
 
-* If the `--recurse` flag is included, the script will assume that the folder `experiment_results/` contains multiple different experiments, each with their own separate folds. The model will do everything as described above for all the experiment subtypes, as well as plot ROC curves, calibration curves, and decision curves across all experiments.
-* If the `--recalibrate` flag is included (RECOMMENDED), logistic recalibration is performed to straighten out the calibration curve. This transformation is monotonic (will not affect discrimination) but tends to improve calibration-related metrics with few if any drawbacks. 
+* If the `--recurse` flag is included, the script will assume that the folder `experiment_results/` contains multiple different experiments, each with their own separate folds. The model will do everything as described above for all the experiment subtypes, as well as plot ROC curves, calibration curves, and decision curves across all experiments. By default every subdirectory is included, ordered alphabetically and labelled by directory name.
+* If an `--ordering` argument is given (requires `--recurse`), it points at a JSON file that maps experiment directory names to plot labels. This pins the order experiments appear in overlay plots, gives them short legend labels, and restricts the overlays to just the listed experiments. See `example_ordering.json`:
+  ```json
+  {
+      "D1_removedtop0percent": "D1: Remove Top 0%",
+      "D1_removedtop5percent": "D1: Remove Top 5%"
+  }
+  ```
+  A list of `[directory_name, plot_label]` pairs is also accepted. Directories named in the file but absent from disk are skipped with a note; if none of them match, the script stops and lists what it expected against what it found.
+* If the `--recalibrate` flag is included (RECOMMENDED), logistic recalibration is performed to straighten out the calibration curve. This transformation is monotonic (will not affect discrimination) but tends to improve calibration-related metrics with few if any drawbacks. This is the only option that requires the `train_*_predictions.json` files — without it, only the `fold_*_predictions.json` files are read. 
 * If a `--threshold` argument is given (between 0 and 1), an additional suite of evaluations will be saved alongside each analysis: 
   * `alert_rate`: the percentage of positive predictions when evaluated at the given threshold
   * `sensitivity`
@@ -132,7 +140,7 @@ Other arguments:
   * `bengio_correction_auroc_pvals.csv` — square p-value matrix for AUROC, convenient for copy-paste into tables
 
 ```bash
-python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate --threshold "0.2" --bengio-correction
+python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate --threshold "0.2" --bengio-correction --ordering example_ordering.json
 ```
 
 ### A note on the Bengio-Nadeau correction
