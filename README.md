@@ -95,12 +95,12 @@ for fold_num in range(n_folds):
         json.dump(test_predictions, f, indent=4)
 
     # SAVE TRAIN CLASSES AND PROBABILISTIC PREDICTIONS FROM MODEL
-    test_predictions = {
+    train_predictions = {
         'y_true': y_train.tolist(),
         'y_proba': train_probas_[:, 1].tolist()
     }
     with open(f"{results_folder_path}/train_{fold_num}_predictions.json", 'w') as f:
-        json.dump(test_predictions, f, indent=4)
+        json.dump(train_predictions, f, indent=4)
 
 ```
 
