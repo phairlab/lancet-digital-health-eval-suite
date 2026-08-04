@@ -78,20 +78,30 @@ for fold_num in range(n_folds):
     ##### ...
 
     # EXAMPLE: FETCH MODEL PROBABILITIES
-    probas_ = classifier.predict_proba(X_test)
+    test_probas_ = classifier.predict_proba(X_test)
+    train_probas_ = classifier.predict_proba(X_train)
 
     # VERIFY OUTPUT DIRECTORY
     results_folder_path = "experiment_results"
     if not os.path.exists(directory_path):
         os.makedirs(directory_path)
 
-    # SAVE TRUE CLASSES AND PROBABILISTIC PREDICTIONS FROM MODEL
+    # SAVE TEST CLASSES AND PROBABILISTIC PREDICTIONS FROM MODEL
     test_predictions = {
         'y_true': y_test.tolist(),
-        'y_proba': probas_[:, 1].tolist()
+        'y_proba': test_probas_[:, 1].tolist()
     }
-    with open(f"{results_folder_path}/f{fold_num}_predictions.json", 'w') as f:
+    with open(f"{results_folder_path}/fold_{fold_num}_predictions.json", 'w') as f:
         json.dump(test_predictions, f, indent=4)
+
+    # SAVE TRAIN CLASSES AND PROBABILISTIC PREDICTIONS FROM MODEL
+    test_predictions = {
+        'y_true': y_train.tolist(),
+        'y_proba': train_probas_[:, 1].tolist()
+    }
+    with open(f"{results_folder_path}/train_{fold_num}_predictions.json", 'w') as f:
+        json.dump(test_predictions, f, indent=4)
+
 ```
 
 ### Arguments and Example Usage
