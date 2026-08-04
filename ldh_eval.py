@@ -35,22 +35,16 @@ warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_m
 #    filtering to use only experiments defined in consistent ordering
 # element 1 of each tuple is the experiment directory name, element 2 is how you want it labeled in plots
 
-consistent_ordering = ()
-# consistent_ordering = ( 
-#     ("LACE","LACE"),
-#     ("LACE-C","LACE-C"),
-#     ("A0","A0"),
-#     ("A1","A1"),
-#     ("A2","A2"),
-#     ("AH","AH"),
-#     ("AH, 2y Lookback","AH, 2y Lookback"),
-#     ("AH+","AH+"),
-#     ("AH+, 2y Lookback","AH+, 2y Lookback"),
-#     ("D0","D0"),
-#     ("D1","D1"),
-#     ("D2","D2"),
-# )  # example 1
-
+# consistent_ordering = ()
+consistent_ordering = ( 
+    ("LACE","LACE"),
+    ("LACE-C","LACE-C"),
+    ("A0","A0"),
+    ("A1","A1"),
+    ("AH","AH"),
+    ("D0","D0"),
+    ("D1","D1"),
+)  # example 1
 
 # consistent_ordering = ( 
 #     ("AH","AH"),
@@ -67,9 +61,11 @@ consistent_ordering = ()
 #     ("D1_removedtop50percent","D1: Remove Top 50%"),
 # )  # example 2
 
+
 # ============================================================================
 
-def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
+def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
+                   y_train_true: Optional[np.ndarray] = None, y_train_prob: Optional[np.ndarray] = None,
                    threshold_range: Tuple[float, float] = (0.0, 0.5),
                    output_dir: Optional[str] = None,
                    threshold: Optional[float] = None,
@@ -78,33 +74,39 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
 
     if recalibrate:
         # Perform logistic recalibration (Platt scaling)
-        # Uses unregularized logistic regression on logit-transformed predictions
-        y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
-        logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
+        # Train on training predictions, then apply to test predictions
+        if y_train_true is None or y_train_prob is None:
+            raise ValueError("y_train_true and y_train_prob are required when recalibrate=True")
+
+        y_train_prob_clipped = np.clip(y_train_prob, 1e-7, 1 - 1e-7)
+        train_logit_pred = np.log(y_train_prob_clipped / (1 - y_train_prob_clipped))
         lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
-        lr.fit(logit_pred.reshape(-1, 1), y_true)
-        y_prob = lr.predict_proba(logit_pred.reshape(-1, 1))[:, 1]
+        lr.fit(train_logit_pred.reshape(-1, 1), y_train_true)
+
+        y_test_prob_clipped = np.clip(y_test_prob, 1e-7, 1 - 1e-7)
+        test_logit_pred = np.log(y_test_prob_clipped / (1 - y_test_prob_clipped))
+        y_test_prob = lr.predict_proba(test_logit_pred.reshape(-1, 1))[:, 1]
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
     # Generate all plots
-    auc = auroc(y_true, y_prob, 
+    auc = auroc(y_test_true, y_test_prob, 
                 save_path=os.path.join(output_dir, 'auroc.png') if output_dir else None)
-    cal_slope = calibration(y_true, y_prob,
+    cal_slope = calibration(y_test_true, y_test_prob,
                            save_path=os.path.join(output_dir, 'calibration.png') if output_dir else None)
-    decision_curve(y_true, y_prob, threshold_range=threshold_range,
+    decision_curve(y_test_true, y_test_prob, threshold_range=threshold_range,
                   save_path=os.path.join(output_dir, 'decision_curve.png') if output_dir else None,
                   threshold=threshold)
-    risk_distribution(y_true, y_prob,
+    risk_distribution(y_test_true, y_test_prob,
                      save_path=os.path.join(output_dir, 'risk_distribution.png') if output_dir else None)
 
     # Calculate Brier score
-    brier = brier_score_loss(y_true, y_prob)
+    brier = brier_score_loss(y_test_true, y_test_prob)
 
     metrics = {
-        'n': len(y_true),
-        'prevalence_pct': float(np.mean(y_true) * 100),
+        'n': len(y_test_true),
+        'prevalence_pct': float(np.mean(y_test_true) * 100),
         'auroc': auc,
         'calibration_slope': cal_slope,
         'brier_score': brier
@@ -112,13 +114,13 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
 
     if threshold is not None:
         # Calculate additional metrics at the given threshold
-        y_pred = (y_prob >= threshold).astype(int)
-        tp = np.sum((y_pred == 1) & (y_true == 1))
-        tn = np.sum((y_pred == 0) & (y_true == 0))
-        fp = np.sum((y_pred == 1) & (y_true == 0))
-        fn = np.sum((y_pred == 0) & (y_true == 1))
+        y_pred = (y_test_prob >= threshold).astype(int)
+        tp = np.sum((y_pred == 1) & (y_test_true == 1))
+        tn = np.sum((y_pred == 0) & (y_test_true == 0))
+        fp = np.sum((y_pred == 1) & (y_test_true == 0))
+        fn = np.sum((y_pred == 0) & (y_test_true == 1))
 
-        alert_rate = (tp + fp) / len(y_true)
+        alert_rate = (tp + fp) / len(y_test_true)
         sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
         specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
         ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
@@ -144,7 +146,7 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
             json.dump(metrics, f, indent=4)
         print(f"✓ Results saved to {output_dir}")
 
-    return metrics, y_prob
+    return metrics, y_test_prob
 
 
 # ============================================================================
@@ -153,11 +155,15 @@ def evaluate_model(y_true: np.ndarray, y_prob: np.ndarray,
 
 def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Evaluate all folds and aggregate results"""
-    json_files = sorted(Path(input_dir).rglob('fold_*_predictions.json'))
+    input_path = Path(input_dir).expanduser()
+    if not input_path.is_absolute():
+        input_path = Path('/').joinpath(input_path)
+
+    json_files = sorted(input_path.rglob('fold_*_predictions.json'))
     # print(json_files)
 
     if not json_files:
-        raise ValueError(f"No fold_*_predictions.json files found in {input_dir}")
+        raise ValueError(f"No fold_*_predictions.json files found in {input_path}")
 
     print(f"Found {len(json_files)} folds")
     all_metrics = []
@@ -170,12 +176,18 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         print(f"Evaluating {fold_name}...")
 
         with open(json_file, 'r') as f:
-            data = json.load(f)
-        y_true = np.array(data['y_true'])
-        y_prob = np.array(data['y_proba'])
+            data_test = json.load(f)
+        y_true = np.array(data_test['y_true'])
+        y_prob = np.array(data_test['y_proba'])
 
-        fold_dir = os.path.join(input_dir, fold_name)
-        metrics, y_prob = evaluate_model(y_true, y_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate) 
+        train_file_name = str(json_file).replace("fold_", "train_")
+        with open(train_file_name, 'r') as f:
+            data_train = json.load(f)
+        y_train_true = np.array(data_train['y_true'])
+        y_train_prob = np.array(data_train['y_proba'])
+
+        fold_dir = os.path.join(str(input_path), fold_name)
+        metrics, y_prob = evaluate_model(y_true, y_prob, y_train_true, y_train_prob, output_dir=fold_dir, threshold=threshold, recalibrate=recalibrate) 
         all_metrics.append(metrics)
 
         pooled_y_true.extend(y_true)
@@ -216,10 +228,14 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Optional[float] = None,
                        bengio_correction: bool = False) -> None:
     """Evaluate multiple experiments recursively and aggregate results."""
-    experiment_dirs = [d for d in Path(input_dir).iterdir() if d.is_dir()]
+    input_path = Path(input_dir).expanduser()
+    if not input_path.is_absolute():
+        input_path = Path('/').joinpath(input_path)
+
+    experiment_dirs = [d for d in input_path.iterdir() if d.is_dir()]
 
     if not experiment_dirs:
-        raise ValueError(f"No experiment directories found in {input_dir}")
+        raise ValueError(f"No experiment directories found in {input_path}")
 
     # Use consistent_ordering if defined, otherwise sort alphabetically
     if consistent_ordering:
@@ -265,7 +281,7 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
     # Generate overlay plots across all experiments
     print("\n=== Generating Overlay Plots Across All Experiments ===")
-    overlay_dir = Path(input_dir) / 'overlay_results'
+    overlay_dir = input_path / 'overlay_results'
     os.makedirs(overlay_dir, exist_ok=True)
 
     # ROC curves overlay
@@ -500,8 +516,11 @@ def bengio_correction_analysis(experiment_dirs_with_labels: list, overlay_dir: P
 
     # Square p-value matrix for AUROC
     if 'auroc' in compare_metrics:
-        auroc_matrix = pd.DataFrame(index=exp_names, columns=exp_names, dtype=float)
-        np.fill_diagonal(auroc_matrix.values, 1.0)
+        auroc_matrix = pd.DataFrame(
+            np.eye(len(exp_names), dtype=float),
+            index=exp_names,
+            columns=exp_names,
+        )
         for row in rows:
             na, nb = row['experiment_A'], row['experiment_B']
             p = row.get('auroc_p', np.nan)
