@@ -282,6 +282,8 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
     correction can use the measured training-set size instead of assuming it.
     """
 
+
+
     if recalibrate:
         # Perform logistic recalibration (Platt scaling)
         # Train on training predictions, then apply to test predictions
@@ -409,6 +411,13 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
                 data_train = json.load(f)
             y_train_true = np.array(data_train['y_true'])
             y_train_prob = np.array(data_train['y_proba'])
+
+            print("fold index:", fold_idx)
+            print(
+                f"{fold_name} shapes: y_true={y_true.shape}, y_prob={y_prob.shape}, "
+                f"y_train_true={y_train_true.shape}, y_train_prob={y_train_prob.shape}"
+            )
+
             n_train = int(y_train_true.size)
         elif recalibrate:
             raise FileNotFoundError(
@@ -442,7 +451,10 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 
     for metric in all_metrics[0].keys():
         values = [m[metric] for m in all_metrics if metric in m]
-        mean, std = np.mean(values), np.std(values)
+        mean = np.mean(values)
+        # Sample SD (ddof=1): the folds are a sample, not the whole population.
+        # Undefined for a single fold, where nan is more honest than an implied 0.
+        std = np.std(values, ddof=1) if len(values) > 1 else np.nan
         aggregate[metric] = {'mean': convert_to_serializable(mean), 'std': convert_to_serializable(std)}
         print(f"{metric}: {mean:.3f} ± {std:.3f}")
 

@@ -333,7 +333,7 @@ The calibration slope is the most expensive component (it fits a logistic regres
 | File | Location | Contents |
 |---|---|---|
 | `metrics.json` | each fold dir | Per-fold metrics, including `n_train` when available |
-| `aggregate_metrics.json` | experiment dir | Fold mean ± SD per metric |
+| `aggregate_metrics.json` | experiment dir | Fold mean ± sample SD per metric |
 | `bootstrap_ci.json` | experiment dir | Point estimate, CI bounds, bootstrap SD, and cluster diagnostics |
 | `combined_metrics.csv` | `overlay_results/` | Numeric table: `_mean`, `_std`, plus `_pooled`, `_ci_lo`, `_ci_hi` |
 | `combined_metrics_formatted.tsv` | `overlay_results/` | Paste-ready: `mean (±SD)` columns plus `{metric}_ci` columns |
@@ -343,6 +343,26 @@ The calibration slope is the most expensive component (it fits a logistic regres
 The `_mean`/`_std` columns are never removed or overwritten, so existing tables built on them keep working. Bear in mind that `{metric}_mean` (average of the per-fold values) and `{metric}_pooled` (computed once on all out-of-fold predictions) are different estimands and will differ slightly; the CI belongs to the pooled figure.
 
 p-values are written at full float precision rather than rounded, so genuinely tiny values appear as e.g. `4.99e-06` instead of collapsing to `0.0`.
+
+### What the `±` means, and what it does not
+
+`_std` and the `(±…)` strings are the **sample standard deviation across folds** (`ddof=1`). This is a description of *spread*: how much the metric moved from fold to fold. It is deliberately **not** a confidence interval, and the two are easy to confuse in a results table.
+
+For 10 folds of a metric with a fold SD of 0.021:
+
+| Quantity | Value | What it answers |
+|---|---|---|
+| SD across folds | 0.021 | How much did performance vary between folds? Does **not** shrink as you add folds. |
+| SE of the mean (`SD/√k`) | 0.007 | How precisely is the average pinned down? Shrinks with more folds — **but is anti-conservative for CV**, because folds share training data and their scores are correlated. |
+| Bootstrap 95% CI | ±0.017 | What range plausibly contains the true value, given patient sampling? |
+
+Three consequences worth knowing:
+
+* **Never report `SD/√k` as a confidence interval for cross-validated performance.** It is roughly 1.45× too narrow at k=10. Use the bootstrap CI (`--bootstrap`) for single-model performance, or the Nadeau-Bengio interval for differences between models — the latter applies exactly this correction.
+* **If you report the `±` columns, label them "SD across folds"**, not "±95% CI" and not "±SE". A reader who assumes a CI will draw the wrong conclusion about precision.
+* **At k=10 the two happen to look similar** — the Nadeau-Bengio 95% half-width works out to about 1.1 × the fold SD, so `mean ± 1 SD` coincidentally approximates a corrected 95% interval. This is an artefact of k=10, not a rule; do not rely on it.
+
+With a single fold there is no sample to take an SD from, so `_std` is `nan` rather than `0`.
 
 
 ## Interpreting the Plots
