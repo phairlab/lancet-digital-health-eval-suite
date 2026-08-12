@@ -364,6 +364,22 @@ Three consequences worth knowing:
 
 With a single fold there is no sample to take an SD from, so `_std` is `nan` rather than `0`.
 
+### CIs on the plots
+
+When `--bootstrap N` is set, the plots that report numbers carry the intervals too:
+
+| Plot | Label |
+|---|---|
+| `pooled_auroc.png` | `AUROC = 0.887 (95% CI 0.866 to 0.906)` in the legend |
+| `pooled_calibration.png` | Slope and Brier CIs in the title (two lines) |
+| `overlay_auroc.png` | `name (AUC=0.887, 95% CI 0.866-0.906)` per experiment |
+| `overlay_calibration.png` | `name (slope=1.000, 95% CI 0.911-1.094)` per experiment |
+
+Two deliberate choices here:
+
+* **The overlay ROC legend reports the pooled AUROC, not the fold mean.** The curve on those axes *is* the pooled curve, so labelling it with the average of the per-fold AUROCs would put a different estimand in the legend from the line being drawn. The two differ because AUROC is a rank statistic: the fold mean only counts (positive, negative) pairs within the same fold, while the pooled figure counts every pair — typically around 90% of which span different folds. Without `--bootstrap`, the legend falls back to the fold mean and says so explicitly (`fold mean AUC=0.891±0.021 SD`).
+* **Per-fold plots never carry CIs**, and **decision curves never carry CIs**. Per-fold plots have no bootstrap of their own; decision curves are omitted because Van Calster et al. advise against attaching confidence intervals to clinical utility measures, where quantifying uncertainty remains contested.
+
 
 ## Interpreting the Plots
 

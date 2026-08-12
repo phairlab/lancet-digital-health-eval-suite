@@ -220,14 +220,31 @@ def bootstrap_ci(y_true: np.ndarray, y_prob: np.ndarray,
 # CORE EVALUATION FUNCTIONS (for direct import)
 # ============================================================================
 
-def auroc(y_true: np.ndarray, y_prob: np.ndarray, 
-          save_path: Optional[str] = None) -> float:
-    """Calculate AUROC and optionally plot ROC curve"""
+def _ci_suffix(ci: Optional[Tuple[float, float]], ci_level: float = 0.95,
+               fmt: str = '.3f') -> str:
+    """Render ' (95% CI lo to hi)' for a plot label, or '' when no CI is given."""
+    if ci is None or any(v is None or not np.isfinite(v) for v in ci):
+        return ''
+    pct = int(round(ci_level * 100))
+    return f" ({pct}% CI {ci[0]:{fmt}} to {ci[1]:{fmt}})"
+
+
+def auroc(y_true: np.ndarray, y_prob: np.ndarray,
+          save_path: Optional[str] = None,
+          ci: Optional[Tuple[float, float]] = None,
+          ci_level: float = 0.95) -> float:
+    """Calculate AUROC and optionally plot ROC curve.
+
+    ci, when supplied, is added to the legend. It must belong to the same
+    predictions being plotted -- pass the bootstrap CI of the pooled AUROC when
+    plotting pooled predictions, and nothing when plotting a single fold.
+    """
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     auc = roc_auc_score(y_true, y_prob)
-    
+
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(fpr, tpr, label=f'AUROC = {auc:.3f}', linewidth=2, color='#1f77b4')
+    ax.plot(fpr, tpr, label=f'AUROC = {auc:.3f}{_ci_suffix(ci, ci_level)}',
+            linewidth=2, color='#1f77b4')
     ax.plot([0, 1], [0, 1], 'k--', label='Random', linewidth=1.5)
     ax.set_xlabel('1 - Specificity', fontsize=12)
     ax.set_ylabel('Sensitivity', fontsize=12)
@@ -247,16 +264,25 @@ def auroc(y_true: np.ndarray, y_prob: np.ndarray,
 
 
 def calibration(y_true: np.ndarray, y_prob: np.ndarray,
-                n_bins: int = 10, save_path: Optional[str] = None, 
-                method: str = 'loess') -> float:
+                n_bins: int = 10, save_path: Optional[str] = None,
+                method: str = 'loess',
+                slope_ci: Optional[Tuple[float, float]] = None,
+                brier_ci: Optional[Tuple[float, float]] = None,
+                ci_level: float = 0.95) -> float:
     """Generate calibration plot with loess smoothing or binned calibration and return calibration slope
-    
+
     Args:
         y_true: True binary labels
         y_prob: Predicted probabilities
         n_bins: Number of bins for binned calibration (default: 10)
         save_path: Path to save figure (optional)
         method: 'loess' or 'binned' (default: 'loess')
+        slope_ci: CI for the calibration slope, added to the title when given
+        brier_ci: CI for the Brier score, added to the title when given
+        ci_level: Confidence level the CIs represent (for the label only)
+
+    slope_ci and brier_ci must belong to the predictions being plotted, so pass
+    the pooled bootstrap CIs only when plotting pooled predictions.
     """
     
     # Calculate calibration slope using unregularized logistic regression on logits
@@ -308,8 +334,18 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
 
     ax.set_xlabel('Predicted Probability', fontsize=12)
     ax.set_ylabel('Observed Proportion', fontsize=12)
-    ax.set_title(f'Calibration Plot (Slope = {calibration_slope:.3f}, Intercept = {calibration_intercept:.3f}, Brier = {brier:.3f})', 
-                 fontsize=12, fontweight='bold')
+    # With CIs the title needs two lines to stay readable
+    if slope_ci is not None or brier_ci is not None:
+        title = (f'Calibration Plot\n'
+                 f'Slope = {calibration_slope:.3f}{_ci_suffix(slope_ci, ci_level)}   '
+                 f'Intercept = {calibration_intercept:.3f}\n'
+                 f'Brier = {brier:.3f}{_ci_suffix(brier_ci, ci_level)}')
+        title_size = 11
+    else:
+        title = (f'Calibration Plot (Slope = {calibration_slope:.3f}, '
+                 f'Intercept = {calibration_intercept:.3f}, Brier = {brier:.3f})')
+        title_size = 12
+    ax.set_title(title, fontsize=title_size, fontweight='bold')
     ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
     ax.grid(alpha=0.3)
     ax.set_xlim(-0.02, 1.02)

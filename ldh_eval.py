@@ -463,19 +463,14 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         json.dump(aggregate, f, indent=4)
 
 
-    # Generate pooled plots
     pooled_y_true = np.array(pooled_y_true)
     pooled_y_prob = np.array(pooled_y_prob)
 
     pooled_dir = str(input_path)  # Save in the same directory as aggregate_metrics.json
     os.makedirs(pooled_dir, exist_ok=True)
 
-    auroc(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_auroc.png'))
-    calibration(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_calibration.png'))
-    decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'), threshold=threshold)
-    risk_distribution(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_risk_distribution.png'))
-
-    # Bootstrap confidence intervals on the pooled out-of-fold predictions
+    # Bootstrap confidence intervals on the pooled out-of-fold predictions.
+    # Runs before the pooled plots so their labels can carry the intervals.
     boot = None
     if n_boot:
         cluster_ids = None
@@ -507,6 +502,24 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
         with open(os.path.join(str(input_path), 'bootstrap_ci.json'), 'w') as f:
             json.dump(boot, f, indent=4)
         print(f"✓ Bootstrap CIs saved to {os.path.join(str(input_path), 'bootstrap_ci.json')}")
+
+    # Generate pooled plots, labelled with the bootstrap CIs when available.
+    # Decision curves deliberately carry no interval: Van Calster et al. advise
+    # against attaching CIs to clinical utility measures.
+    bm = boot['metrics'] if boot else {}
+
+    def _ci_of(name):
+        r = bm.get(name)
+        return (r['ci_lo'], r['ci_hi']) if r else None
+
+    auroc(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_auroc.png'),
+          ci=_ci_of('auroc'), ci_level=ci_level)
+    calibration(pooled_y_true, pooled_y_prob,
+                save_path=os.path.join(pooled_dir, 'pooled_calibration.png'),
+                slope_ci=_ci_of('calibration_slope'), brier_ci=_ci_of('brier_score'),
+                ci_level=ci_level)
+    decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'), threshold=threshold)
+    risk_distribution(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_risk_distribution.png'))
 
     print("\n")
 
@@ -641,12 +654,23 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
 
     # ROC curves overlay
     fig, ax = plt.subplots(figsize=(8, 6))
+    pct_label = int(round(ci_level * 100))
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
         fpr, tpr, _ = roc_curve(y_true, y_prob)
-        # Use mean and std from aggregate metrics instead of pooled AUROC
-        auc_mean = all_experiment_metrics[i]['metrics']['auroc']['mean']
-        auc_std = all_experiment_metrics[i]['metrics']['auroc']['std']
-        ax.plot(fpr, tpr, label=f'{all_experiment_metrics[i]["name"]} (AUC={auc_mean:.3f}±{auc_std:.3f})', linewidth=2)
+        # The curve drawn here is the pooled one, so label it with the pooled AUROC
+        # and its bootstrap CI. Falling back to the fold mean ± SD would put a
+        # different estimand in the legend from the curve on the axes.
+        boot = all_experiment_metrics[i].get('bootstrap')
+        r = boot['metrics'].get('auroc') if boot else None
+        if r:
+            label = (f'{all_experiment_metrics[i]["name"]} '
+                     f'(AUC={r["point"]:.3f}, {pct_label}% CI {r["ci_lo"]:.3f}-{r["ci_hi"]:.3f})')
+        else:
+            auc_mean = all_experiment_metrics[i]['metrics']['auroc']['mean']
+            auc_std = all_experiment_metrics[i]['metrics']['auroc']['std']
+            label = (f'{all_experiment_metrics[i]["name"]} '
+                     f'(fold mean AUC={auc_mean:.3f}±{auc_std:.3f} SD)')
+        ax.plot(fpr, tpr, label=label, linewidth=2)
     ax.plot([0, 1], [0, 1], 'k--', label='Random', linewidth=1.5)
     ax.set_xlabel('1 - Specificity', fontsize=12)
     ax.set_ylabel('Sensitivity', fontsize=12)
@@ -664,10 +688,15 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
         sort_idx = np.argsort(y_prob)
         y_prob_sorted = y_prob[sort_idx]
         y_true_sorted = y_true[sort_idx].astype(float)
+        boot = all_experiment_metrics[i].get('bootstrap')
+        r = boot['metrics'].get('calibration_slope') if boot else None
+        cal_label = all_experiment_metrics[i]['name']
+        if r:
+            cal_label += (f' (slope={r["point"]:.3f}, {pct_label}% CI '
+                          f'{r["ci_lo"]:.3f}-{r["ci_hi"]:.3f})')
         try:
             smoothed = lowess(y_true_sorted, y_prob_sorted, frac=0.25, it=0, return_sorted=True)
-            ax.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2, 
-                    label=all_experiment_metrics[i]['name'])
+            ax.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2, label=cal_label)
         except Exception as e:
             print(f"Warning: Loess smoothing failed for {all_experiment_metrics[i]['name']} ({e})")
     ax.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Perfect calibration')
