@@ -18,11 +18,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, brier_score_loss
-from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 from core_eval_functions import (auroc, calibration, decision_curve, risk_distribution,
-                                 bengio_nadeau_test, bootstrap_ci, BOOTSTRAP_METRICS)
+                                 bengio_nadeau_test, bootstrap_ci, BOOTSTRAP_METRICS,
+                                 fit_apply_recalibration)
 from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
@@ -285,19 +285,10 @@ def evaluate_model(y_test_true: np.ndarray, y_test_prob: np.ndarray,
 
 
     if recalibrate:
-        # Perform logistic recalibration (Platt scaling)
-        # Train on training predictions, then apply to test predictions
-        if y_train_true is None or y_train_prob is None:
-            raise ValueError("y_train_true and y_train_prob are required when recalibrate=True")
-
-        y_train_prob_clipped = np.clip(y_train_prob, 1e-7, 1 - 1e-7)
-        train_logit_pred = np.log(y_train_prob_clipped / (1 - y_train_prob_clipped))
-        lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
-        lr.fit(train_logit_pred.reshape(-1, 1), y_train_true)
-
-        y_test_prob_clipped = np.clip(y_test_prob, 1e-7, 1 - 1e-7)
-        test_logit_pred = np.log(y_test_prob_clipped / (1 - y_test_prob_clipped))
-        y_test_prob = lr.predict_proba(test_logit_pred.reshape(-1, 1))[:, 1]
+        # Logistic recalibration (Platt scaling), fitted on the training
+        # predictions and applied to the test predictions. Shared with nri.py
+        # so both land on the same probability scale.
+        y_test_prob = fit_apply_recalibration(y_train_true, y_train_prob, y_test_prob)
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
