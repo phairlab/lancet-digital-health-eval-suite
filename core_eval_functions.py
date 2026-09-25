@@ -54,6 +54,44 @@ def bengio_nadeau_test(diffs: List[float], n_test: float, n_train: float,
 
 
 # ============================================================================
+# RECALIBRATION
+# ============================================================================
+
+def fit_apply_recalibration(y_train_true: np.ndarray, y_train_prob: np.ndarray,
+                            y_test_prob: np.ndarray) -> np.ndarray:
+    """Logistic recalibration (Platt scaling) fitted on train, applied to test.
+
+    Fits an intercept-and-slope logistic model on the logit of the training
+    predictions, then maps the test predictions through it. Because the fit is
+    on the training fold, the returned test probabilities carry no optimism.
+
+    The map is monotone within a fold, so it leaves that fold's AUROC untouched
+    while moving patients across a fixed absolute-risk threshold. Any metric
+    that depends on a threshold -- sensitivity, specificity, net benefit, NRI --
+    must therefore be computed on the same scale the rest of the table uses.
+
+    Args:
+        y_train_true: Outcomes for the training fold.
+        y_train_prob: Predicted probabilities for the training fold.
+        y_test_prob:  Predicted probabilities for the held-out fold.
+
+    Returns:
+        Recalibrated test probabilities, same shape as y_test_prob.
+    """
+    if y_train_true is None or y_train_prob is None:
+        raise ValueError("y_train_true and y_train_prob are required when recalibrate=True")
+
+    y_train_prob_clipped = np.clip(y_train_prob, 1e-7, 1 - 1e-7)
+    train_logit_pred = np.log(y_train_prob_clipped / (1 - y_train_prob_clipped))
+    lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
+    lr.fit(train_logit_pred.reshape(-1, 1), y_train_true)
+
+    y_test_prob_clipped = np.clip(y_test_prob, 1e-7, 1 - 1e-7)
+    test_logit_pred = np.log(y_test_prob_clipped / (1 - y_test_prob_clipped))
+    return lr.predict_proba(test_logit_pred.reshape(-1, 1))[:, 1]
+
+
+# ============================================================================
 # BOOTSTRAP CONFIDENCE INTERVALS
 # ============================================================================
 
