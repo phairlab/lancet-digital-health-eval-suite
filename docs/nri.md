@@ -38,7 +38,7 @@ print(format_nri_table(df).to_string())
 
 ## What it shares with `ldh_eval.py`
 
-* **The same prediction files.** No new format: it reads the same `fold_*_predictions.json`, and `train_*_predictions.json` when `--recalibrate` is set.
+* **The same prediction files.** No new format: it reads the same `fold_*_predictions.json`, and `train_*_predictions.json` when `--recalibrate` is set. The training predictions must be out-of-fold, as described in [Save your predictions](../README.md#1-save-your-predictions).
 * **The same recalibration map**, via `fit_apply_recalibration()` in `core_eval_functions.py`, fitted per fold on that fold's training predictions.
 * **The same cluster bootstrap.** `--cluster-key`, `--id-key`, `--cluster-map`, and `--cluster-map-cols` behave exactly as documented under [Clustered data](confidence-intervals.md#clustered-data-important), and the same warning applies: without cluster labels the interval assumes one row per subject. The bootstrap is *paired* — one set of resampled indices is applied to both models, preserving the within-patient correlation.
 

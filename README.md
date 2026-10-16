@@ -55,6 +55,8 @@ In the code that trains or runs inference on your model, save the true classes a
 ```python
 import os
 import json
+from sklearn.base import clone
+from sklearn.model_selection import cross_val_predict
 
 # TRAINING LOOP
 for fold_num in range(n_folds):
@@ -65,7 +67,12 @@ for fold_num in range(n_folds):
 
     # EXAMPLE: FETCH MODEL PROBABILITIES
     test_probas_ = classifier.predict_proba(X_test)
-    train_probas_ = classifier.predict_proba(X_train)
+    # Training predictions must be OUT-OF-FOLD: each training row is scored by an
+    # inner model that never saw it. Do NOT use classifier.predict_proba(X_train).
+    # If one patient can contribute several rows, pass cv=GroupKFold(5) and
+    # groups=subject_ids_train so a patient's rows stay in the same inner fold.
+    train_probas_ = cross_val_predict(clone(classifier), X_train, y_train,
+                                      cv=5, method='predict_proba')
 
     # VERIFY OUTPUT DIRECTORY
     results_folder_path = "experiment_results"
@@ -94,6 +101,10 @@ for fold_num in range(n_folds):
         json.dump(train_predictions, f, indent=4)
 
 ```
+
+**The training predictions must be out-of-fold.** `--recalibrate` learns its recalibration map from them, so they have to look like the predictions the model makes on patients it hasn't seen. In-sample predictions from a flexible model are nearly memorised, and a map fitted to them distorts the test predictions instead of correcting them. In a 5-fold simulation, recalibrating from in-sample training predictions dropped the test calibration slope from 1.16 to 0.18 for a random forest and from 0.47 to 0.09 for gradient boosting, while out-of-fold training predictions gave 0.97 and 1.01. Logistic regression barely changes either way, because it hardly overfits its own training data.
+
+Any method that gives every training row a prediction from a model that didn't see it will work: `cross_val_predict` is just the shortest route, and a manual inner loop is fine for models outside scikit-learn. Save a prediction for *every* training row rather than a held-out subset, because the Nadeau-Bengio correction reads the training-set size from this file's length.
 
 Saving the training predictions is worth doing even if you never use `--recalibrate`: they let the Nadeau-Bengio correction use your measured training-set size instead of assuming it.
 
@@ -131,7 +142,7 @@ python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate \
 |---|---|---|
 | `--input_dir DIR` | — | Directory containing the prediction JSONs. The only required argument. |
 | `--recurse` | — | Treat `DIR` as containing several experiments, each with their own folds. Evaluates each, then draws overlay ROC, calibration, and decision curves across all of them. |
-| `--recalibrate` | `train_*` files | **Recommended.** Logistic recalibration to straighten the calibration curve. Monotone within a fold, so discrimination is unaffected, but calibration metrics improve with few drawbacks. The only option that reads the `train_*_predictions.json` files. |
+| `--recalibrate` | out-of-fold `train_*` files | **Recommended.** Logistic recalibration to straighten the calibration curve, fitted on each fold's training predictions and applied to its test predictions. Monotone within a fold, so discrimination is unaffected. The only option that reads the `train_*_predictions.json` files, which must be out-of-fold — see [Save your predictions](#1-save-your-predictions). |
 | `--threshold T` | — | Adds threshold-dependent metrics at `T` (between 0 and 1): `sensitivity`, `specificity`, `ppv`, `npv`, `tp`, `tn`, `fp`, `fn`, and `alert_rate` — the percentage of predictions that are positive at that threshold. |
 | `--bootstrap N` | — | Bootstrap confidence intervals from `N` resamples of the pooled out-of-fold predictions. Default `0` (off); `2000` is reasonable for reporting. See [Confidence intervals](docs/confidence-intervals.md). |
 | `--bengio-correction` | `--recurse` | Pairwise Nadeau-Bengio corrected t-tests between all experiments, with corrected CIs on each difference. |

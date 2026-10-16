@@ -62,8 +62,13 @@ def fit_apply_recalibration(y_train_true: np.ndarray, y_train_prob: np.ndarray,
     """Logistic recalibration (Platt scaling) fitted on train, applied to test.
 
     Fits an intercept-and-slope logistic model on the logit of the training
-    predictions, then maps the test predictions through it. Because the fit is
-    on the training fold, the returned test probabilities carry no optimism.
+    predictions, then maps the test predictions through it. The test fold plays
+    no part in the fit, so the result carries no evaluation optimism.
+
+    The training predictions must be out-of-fold (each row scored by a model
+    that did not see it). In-sample predictions from a flexible model are
+    nearly separated, and a map fitted to them distorts the test predictions
+    rather than correcting them.
 
     The map is monotone within a fold, so it leaves that fold's AUROC untouched
     while moving patients across a fixed absolute-risk threshold. Any metric
