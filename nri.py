@@ -87,8 +87,9 @@ def load_experiment(experiment_dir: str | Path,
 
     Mirrors evaluate_cross_validation(): with recalibrate=True the logistic
     recalibration is fitted on that fold's TRAINING predictions and applied to
-    its held-out test predictions, so the returned probabilities are genuinely
-    out-of-sample and carry no optimism.
+    its held-out test predictions, so the test fold plays no part in the fit.
+    The training predictions must themselves be out-of-fold; see
+    fit_apply_recalibration().
 
     Returns a dict with 'y_true', 'y_prob' (lists of per-fold arrays),
     'row_ids' (list of per-fold arrays or None), and 'cluster_ids'
