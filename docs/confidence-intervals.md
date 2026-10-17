@@ -105,7 +105,7 @@ corrected_var = (1/k + n_test/n_train) × var(differences)
 
 where `k` is the number of folds, `n_test` is the average test set size per fold, and `n_train` is the average training set size per fold. The t-statistic is then `mean(differences) / sqrt(corrected_var)`, evaluated against a t-distribution with `k - 1` degrees of freedom. The correction is conservative relative to the naive test, and is stronger when `n_test/n_train` is large — that is, when you use few folds.
 
-`n_train` is read from your `train_*_predictions.json` files when they are present, and the `n_train_source` column in `bengio_correction.csv` records `measured` when this happened. If they are absent it falls back to the standard k-fold identity `n_train ≈ (k-1) × n_test` and reports `assumed`. Note that under that fallback the correction factor reduces to `1/k + 1/(k-1)`, which depends only on the fold count — dataset size cancels out entirely. Saving the training predictions is therefore worthwhile even if you never use `--recalibrate`.
+`n_train` is read from your `train_*_predictions.json` files when they are present (from their `n_train` key if they have one, otherwise from their row count), and the `n_train_source` column in `bengio_correction.csv` records `measured` when this happened. If they are absent it falls back to the standard k-fold identity `n_train ≈ (k-1) × n_test` and reports `assumed`. Note that under that fallback the correction factor reduces to `1/k + 1/(k-1)`, which depends only on the fold count — dataset size cancels out entirely. Saving the training predictions is therefore worthwhile even if you never use `--recalibrate`.
 
 ## Two caveats worth stating in a methods section
 

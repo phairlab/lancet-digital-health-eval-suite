@@ -104,7 +104,16 @@ for fold_num in range(n_folds):
 
 **The training predictions must be out-of-fold.** `--recalibrate` learns its recalibration map from them, so they have to look like the predictions the model makes on patients it hasn't seen. In-sample predictions from a flexible model are nearly memorised, and a map fitted to them distorts the test predictions instead of correcting them. In a 5-fold simulation, recalibrating from in-sample training predictions dropped the test calibration slope from 1.16 to 0.18 for a random forest and from 0.47 to 0.09 for gradient boosting, while out-of-fold training predictions gave 0.97 and 1.01. Logistic regression barely changes either way, because it hardly overfits its own training data.
 
-Any method that gives every training row a prediction from a model that didn't see it will work: `cross_val_predict` is just the shortest route, and a manual inner loop is fine for models outside scikit-learn. Save a prediction for *every* training row rather than a held-out subset, because the Nadeau-Bengio correction reads the training-set size from this file's length. With `--recalibrate`, the tool warns if most folds' training predictions score well above their test predictions, which is the signature of in-sample predictions.
+Any method that gives training rows predictions from a model that didn't see them will work: `cross_val_predict` is just the shortest route, and a manual inner loop is fine for models outside scikit-learn. With `--recalibrate`, the tool warns if most folds' training predictions score well above their test predictions, which is the signature of in-sample predictions.
+
+**If inner cross-validation is too expensive** (deep learning, very large models), in order of preference:
+
+1. **Fewer inner folds.** `cv=3`, or even `cv=2`. The recalibration map has only two parameters, so it needs far less data than the model does.
+2. **One held-out split.** Train one extra model on about 80% of the training fold and save its predictions on the remaining 20%. That costs a single extra fit.
+3. **A validation split you already have.** If training already holds out data for early stopping, its predictions cost nothing extra. They are slightly optimistic, because the stopping point was chosen on them, but far closer to out-of-sample than predictions on the training data.
+4. **Skip `--recalibrate`.** You still get the calibration plot and slope, which Van Calster et al. consider sufficient for internal validation (Table 2).
+
+Options 2 and 3 save predictions for only part of the training fold, so add `'n_train': len(X_train)` to the train file. The Nadeau-Bengio correction otherwise takes the training-set size from the number of rows in the file.
 
 Saving the training predictions is worth doing even if you never use `--recalibrate`: they let the Nadeau-Bengio correction use your measured training-set size instead of assuming it.
 
@@ -116,6 +125,7 @@ Saving the training predictions is worth doing even if you never use `--recalibr
 | `y_proba` | yes | Predicted probabilities for the positive class |
 | `subject_ids` / `patient_ids` / `cluster_ids` / `group_ids` | no | Per-row cluster label, auto-detected for the cluster bootstrap |
 | `record_ids` / `encounter_ids` / `admission_ids` / `ids` | no | Per-row record id, auto-detected when joining cluster labels from a CSV via `--cluster-map` |
+| `n_train` | no | Train files only: the full training-fold size, when the file holds predictions for just part of it |
 
 Any other keys (`y_pred`, `test_indices`, and so on) are ignored, so it is safe to save extra fields. Names are only auto-detected — you can use any key name you like and point at it explicitly with `--cluster-key` or `--id-key`.
 
@@ -223,6 +233,10 @@ Violin plots show how predicted probabilities are distributed for patients who d
 <img src="examples/overlay_risk_distribution.png" alt="Risk Distribution Plot" width="500">
 
 When `--bootstrap` is set, the plots that report numbers carry their intervals too — see [CIs on the plots](docs/confidence-intervals.md#cis-on-the-plots).
+
+## Licence
+
+The code is released under the [MIT licence](LICENSE). `paper_table2.png` reproduces Table 2 of the paper cited below, © 2025 the authors, published under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); it is not covered by the MIT licence.
 
 ## Citation for Original Paper
 

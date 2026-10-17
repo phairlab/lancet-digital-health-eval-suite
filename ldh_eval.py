@@ -410,7 +410,9 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
                 f"y_train_true={y_train_true.shape}, y_train_prob={y_train_prob.shape}"
             )
 
-            n_train = int(y_train_true.size)
+            # An explicit n_train wins: a file holding predictions for only part
+            # of the training fold (a held-out split) understates its size
+            n_train = int(data_train.get('n_train', y_train_true.size))
 
             if recalibrate:
                 flagged, auc_tr, auc_te = train_predictions_look_in_sample(
