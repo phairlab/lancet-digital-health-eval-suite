@@ -236,7 +236,7 @@ When `--bootstrap` is set, the plots that report numbers carry their intervals t
 
 ## Licence
 
-The code is released under the [MIT licence](LICENSE). `paper_table2.png` reproduces Table 2 of the paper cited below, © 2025 the authors, published under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); it is not covered by the MIT licence.
+Released under the [MIT licence](LICENSE).
 
 ## Citation for Original Paper
 
