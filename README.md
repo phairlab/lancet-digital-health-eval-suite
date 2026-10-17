@@ -67,10 +67,8 @@ for fold_num in range(n_folds):
 
     # EXAMPLE: FETCH MODEL PROBABILITIES
     test_probas_ = classifier.predict_proba(X_test)
-    # Training predictions must be OUT-OF-FOLD: each training row is scored by an
-    # inner model that never saw it. Do NOT use classifier.predict_proba(X_train).
-    # If one patient can contribute several rows, pass cv=GroupKFold(5) and
-    # groups=subject_ids_train so a patient's rows stay in the same inner fold.
+    # Must be out-of-fold, not classifier.predict_proba(X_train). With several
+    # rows per patient, use cv=GroupKFold(5) and groups=subject_ids_train.
     train_probas_ = cross_val_predict(clone(classifier), X_train, y_train,
                                       cv=5, method='predict_proba')
 
@@ -102,18 +100,16 @@ for fold_num in range(n_folds):
 
 ```
 
-**The training predictions must be out-of-fold.** `--recalibrate` learns its recalibration map from them, so they have to look like the predictions the model makes on patients it hasn't seen. In-sample predictions from a flexible model are nearly memorised, and a map fitted to them distorts the test predictions instead of correcting them. In a 5-fold simulation, recalibrating from in-sample training predictions dropped the test calibration slope from 1.16 to 0.18 for a random forest and from 0.47 to 0.09 for gradient boosting, while out-of-fold training predictions gave 0.97 and 1.01. Logistic regression barely changes either way, because it hardly overfits its own training data.
+**Training predictions must be out-of-fold.** `--recalibrate` fits on them, and in-sample predictions from flexible models make it distort calibration rather than fix it (random forest test slope: 0.18, vs 0.97 out-of-fold). The tool warns when they look in-sample.
 
-Any method that gives training rows predictions from a model that didn't see them will work: `cross_val_predict` is just the shortest route, and a manual inner loop is fine for models outside scikit-learn. With `--recalibrate`, the tool warns if most folds' training predictions score well above their test predictions, which is the signature of in-sample predictions.
+**If inner CV is too expensive**, in order of preference:
 
-**If inner cross-validation is too expensive** (deep learning, very large models), in order of preference:
+1. Fewer inner folds (`cv=2` or `3`).
+2. One extra model on ~80% of the training fold, predicting the other 20%.
+3. An existing early-stopping validation split (slightly optimistic).
+4. Skip `--recalibrate`; the calibration plot and slope suffice for internal validation (Van Calster et al., Table 2).
 
-1. **Fewer inner folds.** `cv=3`, or even `cv=2`. The recalibration map has only two parameters, so it needs far less data than the model does.
-2. **One held-out split.** Train one extra model on about 80% of the training fold and save its predictions on the remaining 20%. That costs a single extra fit.
-3. **A validation split you already have.** If training already holds out data for early stopping, its predictions cost nothing extra. They are slightly optimistic, because the stopping point was chosen on them, but far closer to out-of-sample than predictions on the training data.
-4. **Skip `--recalibrate`.** You still get the calibration plot and slope, which Van Calster et al. consider sufficient for internal validation (Table 2).
-
-Options 2 and 3 save predictions for only part of the training fold, so add `'n_train': len(X_train)` to the train file. The Nadeau-Bengio correction otherwise takes the training-set size from the number of rows in the file.
+For options 2 and 3, add `'n_train': len(X_train)` to the train file.
 
 Saving the training predictions is worth doing even if you never use `--recalibrate`: they let the Nadeau-Bengio correction use your measured training-set size instead of assuming it.
 
@@ -125,7 +121,7 @@ Saving the training predictions is worth doing even if you never use `--recalibr
 | `y_proba` | yes | Predicted probabilities for the positive class |
 | `subject_ids` / `patient_ids` / `cluster_ids` / `group_ids` | no | Per-row cluster label, auto-detected for the cluster bootstrap |
 | `record_ids` / `encounter_ids` / `admission_ids` / `ids` | no | Per-row record id, auto-detected when joining cluster labels from a CSV via `--cluster-map` |
-| `n_train` | no | Train files only: the full training-fold size, when the file holds predictions for just part of it |
+| `n_train` | no | Full training-fold size, if the train file covers only part of it |
 
 Any other keys (`y_pred`, `test_indices`, and so on) are ignored, so it is safe to save extra fields. Names are only auto-detected — you can use any key name you like and point at it explicitly with `--cluster-key` or `--id-key`.
 
@@ -152,7 +148,7 @@ python ldh_eval.py --input_dir "experiment_results/" --recurse --recalibrate \
 |---|---|---|
 | `--input_dir DIR` | — | Directory containing the prediction JSONs. The only required argument. |
 | `--recurse` | — | Treat `DIR` as containing several experiments, each with their own folds. Evaluates each, then draws overlay ROC, calibration, and decision curves across all of them. |
-| `--recalibrate` | out-of-fold `train_*` files | **Recommended.** Logistic recalibration to straighten the calibration curve, fitted on each fold's training predictions and applied to its test predictions. Monotone within a fold, so discrimination is unaffected. The only option that reads the `train_*_predictions.json` files, which must be out-of-fold — see [Save your predictions](#1-save-your-predictions). |
+| `--recalibrate` | [out-of-fold `train_*` files](#1-save-your-predictions) | **Recommended.** Logistic recalibration, fitted on each fold's training predictions and applied to its test predictions. Monotone within a fold, so discrimination is unaffected. |
 | `--threshold T` | — | Adds threshold-dependent metrics at `T` (between 0 and 1): `sensitivity`, `specificity`, `ppv`, `npv`, `tp`, `tn`, `fp`, `fn`, and `alert_rate` — the percentage of predictions that are positive at that threshold. |
 | `--bootstrap N` | — | Bootstrap confidence intervals from `N` resamples of the pooled out-of-fold predictions. Default `0` (off); `2000` is reasonable for reporting. See [Confidence intervals](docs/confidence-intervals.md). |
 | `--bengio-correction` | `--recurse` | Pairwise Nadeau-Bengio corrected t-tests between all experiments, with corrected CIs on each difference. |
