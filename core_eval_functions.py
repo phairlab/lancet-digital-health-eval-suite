@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from scipy import stats, optimize, special
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
-from statsmodels.nonparametric.smoothers_lowess import lowess
 
 # Suppress sklearn warnings about penalty/C parameters
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.linear_model')
@@ -228,6 +227,31 @@ def resample_metrics(y_true: np.ndarray, y_prob: np.ndarray,
     return out
 
 
+def _cluster_groups(cluster_ids: Optional[np.ndarray], n: int) -> Optional[List[np.ndarray]]:
+    """Row indices grouped by cluster, so a bootstrap draw is a concatenation of
+    blocks. None when there are no cluster labels (row-level resampling)."""
+    if cluster_ids is None:
+        return None
+    cluster_ids = np.asarray(cluster_ids)
+    if cluster_ids.size != n:
+        raise ValueError(
+            f"cluster_ids has {cluster_ids.size} entries but there are {n} predictions"
+        )
+    order = np.argsort(cluster_ids, kind='stable')
+    _, starts = np.unique(cluster_ids[order], return_index=True)
+    return np.split(order, starts[1:])
+
+
+def _draw_indices(rng: np.random.Generator, n: int,
+                  groups: Optional[List[np.ndarray]]) -> np.ndarray:
+    """One bootstrap resample: rows with replacement, or whole clusters when
+    groups is given."""
+    if groups is None:
+        return rng.integers(0, n, n)
+    picked = rng.integers(0, len(groups), len(groups))
+    return np.concatenate([groups[k] for k in picked])
+
+
 def bootstrap_ci(y_true: np.ndarray, y_prob: np.ndarray,
                  cluster_ids: Optional[np.ndarray] = None,
                  n_boot: int = 2000, threshold: Optional[float] = None,
@@ -260,25 +284,11 @@ def bootstrap_ci(y_true: np.ndarray, y_prob: np.ndarray,
     n = int(y_true.size)
     rng = np.random.default_rng(seed)
 
-    groups = None
-    if cluster_ids is not None:
-        cluster_ids = np.asarray(cluster_ids)
-        if cluster_ids.size != n:
-            raise ValueError(
-                f"cluster_ids has {cluster_ids.size} entries but there are {n} predictions"
-            )
-        # Row indices grouped by cluster, so a draw is a concatenation of blocks
-        order = np.argsort(cluster_ids, kind='stable')
-        _, starts = np.unique(cluster_ids[order], return_index=True)
-        groups = np.split(order, starts[1:])
+    groups = _cluster_groups(cluster_ids, n)
 
     draws: dict = {}
     for _ in range(n_boot):
-        if groups is None:
-            idx = rng.integers(0, n, n)
-        else:
-            picked = rng.integers(0, len(groups), len(groups))
-            idx = np.concatenate([groups[k] for k in picked])
+        idx = _draw_indices(rng, n, groups)
         for key, val in resample_metrics(y_true[idx], y_prob[idx], threshold).items():
             draws.setdefault(key, []).append(val)
 
@@ -316,6 +326,75 @@ def bootstrap_ci(y_true: np.ndarray, y_prob: np.ndarray,
         meta['effective_cluster_size'] = float((sizes ** 2).sum() / sizes.sum())
 
     return results, meta
+
+
+# ============================================================================
+# FLEXIBLE CALIBRATION CURVE
+# ============================================================================
+
+# R's loess() defaults, as used for the calibration plots in Van Calster et al.
+# (2025) and its accompanying code: span 0.75, local quadratic, tricube weights.
+LOESS_SPAN = 0.75
+
+
+def calibration_grid(y_prob: np.ndarray, n_points: int = 100) -> np.ndarray:
+    """Points at which to evaluate the calibration curve: the observed risk range."""
+    p = np.asarray(y_prob, dtype=float)
+    return np.linspace(p.min(), p.max(), n_points)
+
+
+def loess_curve(y_true: np.ndarray, y_prob: np.ndarray, grid: np.ndarray,
+                span: float = LOESS_SPAN) -> np.ndarray:
+    """Loess of outcome on predicted risk, evaluated at grid.
+
+    Local quadratic regression with tricube weights over the floor(span * n)
+    predictions nearest each grid point: the definition behind R's
+    loess(y ~ p, degree = 2). R evaluates it through an interpolation surface
+    by default; this computes it directly.
+    """
+    x = np.asarray(y_prob, dtype=float)
+    y = np.asarray(y_true, dtype=float)
+    g = np.asarray(grid, dtype=float)
+    q = min(max(int(np.floor(span * x.size)), 3), x.size)
+    fit = np.empty(g.size)
+    step = max(1, 2_000_000 // x.size)   # keeps the (grid x n) work arrays ~2M elements
+    with np.errstate(over='ignore', divide='ignore', invalid='ignore'):
+        for s in range(0, g.size, step):
+            dx = x[None, :] - g[s:s + step, None]
+            d = np.abs(dx)
+            h = np.partition(d, q - 1, axis=1)[:, q - 1:q]   # distance to q-th neighbour
+            h = np.where(h > 0, h, np.finfo(float).tiny)
+            w = np.clip(1 - (d / h) ** 3, 0, None) ** 3
+            u = np.where(w > 0, dx / h, 0.0)                 # scaled for conditioning
+            m = [(w * u ** k).sum(axis=1) for k in range(5)]
+            t = [(w * u ** k * y).sum(axis=1) for k in range(3)]
+            A = np.stack([np.stack(m[i:i + 3], axis=-1) for i in range(3)], axis=-2)
+            fit[s:s + step] = (np.linalg.pinv(A) @ np.stack(t, axis=-1)[..., None])[:, 0, 0]
+    return fit
+
+
+def calibration_band(y_true: np.ndarray, y_prob: np.ndarray,
+                     cluster_ids: Optional[np.ndarray] = None, n_boot: int = 200,
+                     ci_level: float = 0.95, seed: int = 0
+                     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pointwise percentile bootstrap band for the loess calibration curve.
+
+    Resamples rows, or whole clusters when cluster_ids is given, exactly as
+    bootstrap_ci() does, refits the curve on a fixed grid, and takes pointwise
+    percentiles. Returns (grid, lo, hi).
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob, dtype=float)
+    grid = calibration_grid(y_prob)
+    groups = _cluster_groups(cluster_ids, y_true.size)
+    rng = np.random.default_rng(seed)
+    curves = np.empty((n_boot, grid.size))
+    for b in range(n_boot):
+        idx = _draw_indices(rng, y_true.size, groups)
+        curves[b] = loess_curve(y_true[idx], y_prob[idx], grid)
+    lo_pct = (1 - ci_level) / 2 * 100
+    lo, hi = np.percentile(curves, [lo_pct, 100 - lo_pct], axis=0)
+    return grid, lo, hi
 
 
 # ============================================================================
@@ -370,7 +449,8 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
                 method: str = 'loess',
                 slope_ci: Optional[Tuple[float, float]] = None,
                 brier_ci: Optional[Tuple[float, float]] = None,
-                ci_level: float = 0.95) -> float:
+                ci_level: float = 0.95,
+                band: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None) -> float:
     """Generate calibration plot with loess smoothing or binned calibration and return calibration slope
 
     Args:
@@ -382,8 +462,9 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
         slope_ci: CI for the calibration slope, added to the title when given
         brier_ci: CI for the Brier score, added to the title when given
         ci_level: Confidence level the CIs represent (for the label only)
+        band: (grid, lo, hi) from calibration_band(), shaded around the loess curve
 
-    slope_ci and brier_ci must belong to the predictions being plotted, so pass
+    slope_ci, brier_ci and band must belong to the predictions being plotted, so pass
     the pooled bootstrap CIs only when plotting pooled predictions.
     """
     
@@ -398,24 +479,12 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
     fig, ax = plt.subplots(figsize=(8, 6))
     
     if method == 'loess':
-        # Sort data for smoothing
-        sort_idx = np.argsort(y_prob)
-        y_prob_sorted = y_prob[sort_idx]
-        y_true_sorted = y_true[sort_idx].astype(float)
-        
-        # Apply loess with more conservative settings
-        try:
-            smoothed = lowess(y_true_sorted, y_prob_sorted, 
-                             frac=0.25, it=0, return_sorted=True)
-            ax.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2.5, 
-                    label='Model (loess)', color='#1f77b4')
-        except Exception as e:
-            print(f"Warning: Loess smoothing failed ({e}), falling back to binned calibration")
-            # Fallback to binned
-            from sklearn.calibration import calibration_curve
-            prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=n_bins, strategy='uniform')
-            ax.plot(prob_pred, prob_true, 'o-', linewidth=2, markersize=8,
-                    label='Model (binned)', color='#1f77b4')
+        grid = band[0] if band is not None else calibration_grid(y_prob)
+        ax.plot(grid, loess_curve(y_true, y_prob, grid), linewidth=2.5,
+                label='Model (loess)', color='#1f77b4')
+        if band is not None:
+            ax.fill_between(band[0], band[1], band[2], color='#1f77b4', alpha=0.2,
+                            linewidth=0, label=f'{int(round(ci_level * 100))}% CI')
     
     elif method == 'binned':
         # Use binned calibration

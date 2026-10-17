@@ -3,7 +3,7 @@
 Quick, rigorous evaluation of clinical prediction models, following the core recommendations from Van Calster et al.'s 2025 *Lancet Digital Health* Viewpoint. Given predicted probabilities and true outcomes, it produces the four essential plots and numbers:
 
 1. **AUROC** — discrimination performance
-2. **Calibration plot** — agreement between predictions and observations, with loess smoothing
+2. **Calibration plot** — agreement between predictions and observations, with loess smoothing (span 0.75, degree 2, as in the paper)
 3. **Decision curve** — net benefit across decision thresholds
 4. **Risk distribution** — probability distributions by outcome, as violin plots
 

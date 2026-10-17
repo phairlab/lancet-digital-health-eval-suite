@@ -18,11 +18,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, brier_score_loss
-from statsmodels.nonparametric.smoothers_lowess import lowess
 
 from core_eval_functions import (auroc, calibration, decision_curve, risk_distribution,
                                  bengio_nadeau_test, bootstrap_ci, BOOTSTRAP_METRICS,
-                                 fit_apply_recalibration, train_predictions_look_in_sample)
+                                 fit_apply_recalibration, train_predictions_look_in_sample,
+                                 calibration_grid, loess_curve, calibration_band)
 from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
@@ -482,6 +482,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     # Bootstrap confidence intervals on the pooled out-of-fold predictions.
     # Runs before the pooled plots so their labels can carry the intervals.
     boot = None
+    cal_band = None
     if n_boot:
         cluster_ids = None
         if clusters_available and pooled_cluster_ids:
@@ -513,6 +514,13 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
             json.dump(boot, f, indent=4)
         print(f"✓ Bootstrap CIs saved to {os.path.join(str(input_path), 'bootstrap_ci.json')}")
 
+        # Each resample refits the loess curve, which is slow on large cohorts,
+        # so the plotted band uses at most 200 resamples
+        n_band = min(n_boot, 200)
+        print(f"Bootstrapping the calibration curve band ({n_band} resamples)...")
+        cal_band = calibration_band(pooled_y_true, pooled_y_prob, cluster_ids=cluster_ids,
+                                    n_boot=n_band, ci_level=ci_level, seed=seed)
+
     # Generate pooled plots, labelled with the bootstrap CIs when available.
     # Decision curves deliberately carry no interval: Van Calster et al. advise
     # against attaching CIs to clinical utility measures.
@@ -527,7 +535,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     calibration(pooled_y_true, pooled_y_prob,
                 save_path=os.path.join(pooled_dir, 'pooled_calibration.png'),
                 slope_ci=_ci_of('calibration_slope'), brier_ci=_ci_of('brier_score'),
-                ci_level=ci_level)
+                ci_level=ci_level, band=cal_band)
     decision_curve(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_decision_curve.png'), threshold=threshold)
     risk_distribution(pooled_y_true, pooled_y_prob, save_path=os.path.join(pooled_dir, 'pooled_risk_distribution.png'))
 
@@ -695,20 +703,14 @@ def evaluate_recursive(input_dir: str, recalibrate: bool = False, threshold: Opt
     # Calibration curves overlay
     fig, ax = plt.subplots(figsize=(8, 6))
     for i, (y_true, y_prob) in enumerate(zip(pooled_y_trues, pooled_y_probs)):
-        sort_idx = np.argsort(y_prob)
-        y_prob_sorted = y_prob[sort_idx]
-        y_true_sorted = y_true[sort_idx].astype(float)
         boot = all_experiment_metrics[i].get('bootstrap')
         r = boot['metrics'].get('calibration_slope') if boot else None
         cal_label = all_experiment_metrics[i]['name']
         if r:
             cal_label += (f' (slope={r["point"]:.3f}, {pct_label}% CI '
                           f'{r["ci_lo"]:.3f}-{r["ci_hi"]:.3f})')
-        try:
-            smoothed = lowess(y_true_sorted, y_prob_sorted, frac=0.25, it=0, return_sorted=True)
-            ax.plot(smoothed[:, 0], smoothed[:, 1], linewidth=2, label=cal_label)
-        except Exception as e:
-            print(f"Warning: Loess smoothing failed for {all_experiment_metrics[i]['name']} ({e})")
+        grid = calibration_grid(y_prob)
+        ax.plot(grid, loess_curve(y_true, y_prob, grid), linewidth=2, label=cal_label)
     ax.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Perfect calibration')
     ax.set_xlabel('Predicted Probability', fontsize=12)
     ax.set_ylabel('Observed Proportion', fontsize=12)

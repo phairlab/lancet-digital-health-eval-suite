@@ -122,7 +122,7 @@ Roughly 25 ms per resample at 120k rows for all metrics combined, single-threade
 | 120k | ~50 s |
 | 120k × 7 experiments | ~6 min |
 
-The calibration slope is the most expensive component (it fits a logistic regression per resample). Halve `N` to halve the time; `N=1000` is usually enough for a stable 95% interval, while `N=2000+` steadies the tails.
+The calibration slope is the most expensive component (it fits a logistic regression per resample). Halve `N` to halve the time; `N=1000` is usually enough for a stable 95% interval, while `N=2000+` steadies the tails. The calibration-curve band adds about 1.5 minutes at 120k rows.
 
 
 ## What the `±` means, and what it does not
@@ -152,7 +152,7 @@ When `--bootstrap N` is set, the plots that report numbers carry the intervals t
 | Plot | Label |
 |---|---|
 | `pooled_auroc.png` | `AUROC = 0.887 (95% CI 0.866 to 0.906)` in the legend |
-| `pooled_calibration.png` | Slope and Brier CIs in the title (two lines) |
+| `pooled_calibration.png` | Slope and Brier CIs in the title, and a shaded band around the loess curve (at most 200 resamples) |
 | `overlay_auroc.png` | `name (AUC=0.887, 95% CI 0.866-0.906)` per experiment |
 | `overlay_calibration.png` | `name (slope=1.000, 95% CI 0.911-1.094)` per experiment |
 
