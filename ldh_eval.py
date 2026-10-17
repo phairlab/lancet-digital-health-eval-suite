@@ -22,7 +22,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 
 from core_eval_functions import (auroc, calibration, decision_curve, risk_distribution,
                                  bengio_nadeau_test, bootstrap_ci, BOOTSTRAP_METRICS,
-                                 fit_apply_recalibration)
+                                 fit_apply_recalibration, train_predictions_look_in_sample)
 from helpers import risk_distribution_grid, convert_to_serializable
 
 # Suppress sklearn warnings about penalty/C parameters
@@ -380,6 +380,7 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
     pooled_y_prob = []
     pooled_cluster_ids = []
     clusters_available = True
+    in_sample_folds = []
 
     # Evaluate each fold
     for fold_idx, json_file in enumerate(json_files):
@@ -410,6 +411,12 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
             )
 
             n_train = int(y_train_true.size)
+
+            if recalibrate:
+                flagged, auc_tr, auc_te = train_predictions_look_in_sample(
+                    y_train_true, y_train_prob, y_true, y_prob)
+                if flagged:
+                    in_sample_folds.append((fold_name, auc_tr, auc_te))
         elif recalibrate:
             raise FileNotFoundError(
                 f"--recalibrate needs training predictions, but '{train_file.name}' was not "
@@ -435,6 +442,16 @@ def evaluate_cross_validation(input_dir: str, recalibrate: bool = False, thresho
 
         pooled_y_true.extend(y_true)
         pooled_y_prob.extend(y_prob)
+
+    # In-sample predictions trip the check in nearly every fold; sampling noise
+    # trips isolated ones, so warn only when at least half the folds are flagged.
+    if in_sample_folds and 2 * len(in_sample_folds) >= len(json_files):
+        name, auc_tr, auc_te = in_sample_folds[0]
+        print(f"\nWarning: training predictions look in-sample in {len(in_sample_folds)} of "
+              f"{len(json_files)} folds (e.g. {name}: train AUROC {auc_tr:.3f} vs test "
+              f"{auc_te:.3f}). --recalibrate fits its map on these, and in-sample predictions "
+              f"from a flexible model make it distort calibration rather than fix it. Save "
+              f"out-of-fold training predictions instead (README, 'Save your predictions').\n")
 
     # Aggregate across folds
     print(f"\n=== Aggregate Results for {input_dir} ===")

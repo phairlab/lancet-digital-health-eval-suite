@@ -45,7 +45,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from core_eval_functions import fit_apply_recalibration
+from core_eval_functions import fit_apply_recalibration, train_predictions_look_in_sample
 from ldh_eval import (
     resolve_input_dir, extract_cluster_ids, load_cluster_map, load_ordering,
     _norm_id, DIRECT_CLUSTER_KEYS, RECORD_ID_KEYS,
@@ -98,6 +98,7 @@ def load_experiment(experiment_dir: str | Path,
     experiment_dir = resolve_input_dir(str(experiment_dir))
     y_true_folds, y_prob_folds, id_folds = [], [], []
     pooled_clusters, clusters_available = [], want_clusters
+    in_sample_folds = []
 
     for fold_idx, test_file in enumerate(_fold_files(experiment_dir)):
         with open(test_file) as f:
@@ -117,11 +118,13 @@ def load_experiment(experiment_dir: str | Path,
                 )
             with open(train_file) as f:
                 train = json.load(f)
-            y_prob = fit_apply_recalibration(
-                np.asarray(train['y_true']),
-                np.asarray(train['y_proba'], dtype=float),
-                y_prob,
-            )
+            y_train_true = np.asarray(train['y_true'])
+            y_train_prob = np.asarray(train['y_proba'], dtype=float)
+            flagged, auc_tr, auc_te = train_predictions_look_in_sample(
+                y_train_true, y_train_prob, y_true, y_prob)
+            if flagged:
+                in_sample_folds.append((test_file.stem.replace('_predictions', ''), auc_tr, auc_te))
+            y_prob = fit_apply_recalibration(y_train_true, y_train_prob, y_prob)
 
         if clusters_available:
             ids = extract_cluster_ids(
@@ -137,6 +140,15 @@ def load_experiment(experiment_dir: str | Path,
         y_true_folds.append(y_true)
         y_prob_folds.append(y_prob)
         id_folds.append(_row_ids(test))
+
+    # Warn only when at least half the folds are flagged; see ldh_eval.
+    if in_sample_folds and 2 * len(in_sample_folds) >= len(y_true_folds):
+        name, auc_tr, auc_te = in_sample_folds[0]
+        print(f"Warning: {experiment_dir.name}: training predictions look in-sample in "
+              f"{len(in_sample_folds)} of {len(y_true_folds)} folds (e.g. {name}: train AUROC "
+              f"{auc_tr:.3f} vs test {auc_te:.3f}). Recalibration fitted on in-sample "
+              f"predictions distorts calibration, which moves patients across the threshold "
+              f"and so changes the NRI. Save out-of-fold training predictions (see README).")
 
     return {
         'y_true': y_true_folds,

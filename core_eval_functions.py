@@ -2,7 +2,7 @@ import warnings
 from typing import Optional, Tuple, List
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import stats
+from scipy import stats, optimize, special
 from sklearn.metrics import roc_curve, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
@@ -88,7 +88,9 @@ def fit_apply_recalibration(y_train_true: np.ndarray, y_train_prob: np.ndarray,
 
     y_train_prob_clipped = np.clip(y_train_prob, 1e-7, 1 - 1e-7)
     train_logit_pred = np.log(y_train_prob_clipped / (1 - y_train_prob_clipped))
-    lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
+    # C=inf is the unregularised fit; penalty=None is deprecated in sklearn 1.8
+    # and removed in 1.10
+    lr = LogisticRegression(C=np.inf, solver='lbfgs', max_iter=1000)
     lr.fit(train_logit_pred.reshape(-1, 1), y_train_true)
 
     y_test_prob_clipped = np.clip(y_test_prob, 1e-7, 1 - 1e-7)
@@ -135,6 +137,63 @@ def _fast_calibration_slope(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     lr = LogisticRegression(C=np.inf, solver='lbfgs', max_iter=1000)
     lr.fit(logit.reshape(-1, 1), y_true)
     return float(lr.coef_[0][0])
+
+
+def calibration_intercept(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Calibration intercept (calibration-in-the-large), with the slope fixed at 1.
+
+    Solves logit P(y=1) = a + logit(p) for a, i.e. a logistic regression with
+    the predicted logit as an offset. This is the calibration intercept in
+    Van Calster et al. (2025): a > 0 means risks are underestimated on
+    average, a < 0 overestimated.
+
+    It is NOT the intercept of the joint fit a + b*logit(p) that yields the
+    calibration slope. That intercept changes with b and has no
+    calibration-in-the-large interpretation unless b = 1.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    if np.unique(y_true).size < 2:
+        return np.nan
+    p = np.clip(np.asarray(y_prob, dtype=float), 1e-7, 1 - 1e-7)
+    offset = np.log(p / (1 - p))
+    # Score equation sum(y - expit(a + offset)) = 0 is strictly decreasing in a,
+    # and changes sign on this bracket because both outcome classes are present
+    # and |offset| <= logit(1 - 1e-7) ~ 16.1.
+    return float(optimize.brentq(
+        lambda a: np.sum(y_true - special.expit(a + offset)), -50.0, 50.0))
+
+
+def train_predictions_look_in_sample(y_train_true: np.ndarray, y_train_prob: np.ndarray,
+                                     y_test_true: np.ndarray, y_test_prob: np.ndarray,
+                                     min_gap: float = 0.05) -> Tuple[bool, float, float]:
+    """Heuristic check that training predictions are out-of-fold.
+
+    --recalibrate fits its map on the training predictions, so they must come
+    from models that did not see those rows. In-sample predictions from a
+    flexible model score far better than its held-out predictions, which shows
+    up as a train AUROC well above the test AUROC. Out-of-fold predictions
+    should agree with the test fold to within sampling noise.
+
+    Flags when the gap exceeds both min_gap and twice the Hanley-McNeil
+    standard error of the test AUROC, so small test folds don't trip it on noise
+    alone. A heuristic: callers should warn, never fail, and should require
+    most folds to be flagged, since noise alone flags about 1% of folds.
+
+    Returns (flagged, train_auroc, test_auroc).
+    """
+    y_tr, y_te = np.asarray(y_train_true), np.asarray(y_test_true)
+    auc_tr = _fast_auroc(y_tr, np.asarray(y_train_prob, dtype=float))
+    auc_te = _fast_auroc(y_te, np.asarray(y_test_prob, dtype=float))
+    if not (np.isfinite(auc_tr) and np.isfinite(auc_te)):
+        return False, auc_tr, auc_te
+
+    n1 = int(y_te.sum())
+    n0 = int(y_te.size - n1)
+    q1 = auc_te / (2 - auc_te)
+    q2 = 2 * auc_te ** 2 / (1 + auc_te)
+    se_te = np.sqrt(max(auc_te * (1 - auc_te) + (n1 - 1) * (q1 - auc_te ** 2)
+                        + (n0 - 1) * (q2 - auc_te ** 2), 0.0) / (n1 * n0))
+    return bool(auc_tr - auc_te > max(min_gap, 2 * se_te)), auc_tr, auc_te
 
 
 def resample_metrics(y_true: np.ndarray, y_prob: np.ndarray,
@@ -328,15 +387,11 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
     the pooled bootstrap CIs only when plotting pooled predictions.
     """
     
-    # Calculate calibration slope using unregularized logistic regression on logits
-    y_prob_clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
-    logit_pred = np.log(y_prob_clipped / (1 - y_prob_clipped))
-    
-    lr = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000)
-    lr.fit(logit_pred.reshape(-1, 1), y_true)
-    calibration_slope = lr.coef_[0][0]
-    calibration_intercept = lr.intercept_[0]
-    
+    # Slope from the unregularised logistic fit on the logits; intercept with
+    # the slope fixed at 1, as in Van Calster et al. (2025)
+    calibration_slope = _fast_calibration_slope(y_true, y_prob)
+    cal_intercept = calibration_intercept(y_true, y_prob)
+
     brier = brier_score_loss(y_true, y_prob)
     
     # Create figure
@@ -381,12 +436,12 @@ def calibration(y_true: np.ndarray, y_prob: np.ndarray,
     if slope_ci is not None or brier_ci is not None:
         title = (f'Calibration Plot\n'
                  f'Slope = {calibration_slope:.3f}{_ci_suffix(slope_ci, ci_level)}   '
-                 f'Intercept = {calibration_intercept:.3f}\n'
+                 f'Intercept = {cal_intercept:.3f}\n'
                  f'Brier = {brier:.3f}{_ci_suffix(brier_ci, ci_level)}')
         title_size = 11
     else:
         title = (f'Calibration Plot (Slope = {calibration_slope:.3f}, '
-                 f'Intercept = {calibration_intercept:.3f}, Brier = {brier:.3f})')
+                 f'Intercept = {cal_intercept:.3f}, Brier = {brier:.3f})')
         title_size = 12
     ax.set_title(title, fontsize=title_size, fontweight='bold')
     ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
